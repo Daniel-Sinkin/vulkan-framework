@@ -1,0 +1,198 @@
+#include "ds_vk/mesh.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <limits>
+#include <numbers>
+
+namespace ds_vk
+{
+namespace
+{
+auto push_face(
+    MeshData& mesh,
+    const Vec3 a,
+    const Vec3 b,
+    const Vec3 c,
+    const Vec3 d,
+    const Vec3 normal,
+    const Vec4 color
+) -> void
+{
+    const auto base = static_cast<u32>(mesh.vertices.size());
+    mesh.vertices.push_back(Vertex{.position = a, .normal = normal, .color = color});
+    mesh.vertices.push_back(Vertex{.position = b, .normal = normal, .color = color});
+    mesh.vertices.push_back(Vertex{.position = c, .normal = normal, .color = color});
+    mesh.vertices.push_back(Vertex{.position = d, .normal = normal, .color = color});
+    mesh.indices.insert(
+        mesh.indices.end(), {base + 0u, base + 1u, base + 2u, base + 0u, base + 2u, base + 3u}
+    );
+}
+}  // namespace
+
+auto Transform::matrix() const noexcept -> Mat4
+{
+    const auto translation_matrix = glm::translate(Mat4{1.0f}, translation);
+    const auto rotation_matrix = glm::mat4_cast(rotation);
+    const auto scale_matrix = glm::scale(Mat4{1.0f}, scale);
+    return translation_matrix * rotation_matrix * scale_matrix;
+}
+
+auto make_quad(const f32 side_length, const Vec4 color) -> MeshData
+{
+    const auto half = 0.5f * std::max(0.0f, side_length);
+    auto mesh = MeshData{};
+    mesh.vertices = {
+        Vertex{.position = {-half, -half, 0.0f}, .normal = k_axis_z, .color = color},
+        Vertex{.position = {half, -half, 0.0f}, .normal = k_axis_z, .color = color},
+        Vertex{.position = {half, half, 0.0f}, .normal = k_axis_z, .color = color},
+        Vertex{.position = {-half, half, 0.0f}, .normal = k_axis_z, .color = color},
+    };
+    mesh.indices = {0u, 1u, 2u, 0u, 2u, 3u};
+    return mesh;
+}
+
+auto make_cube(const f32 side_length, const Vec4 color) -> MeshData
+{
+    const auto half = 0.5f * std::max(0.0f, side_length);
+    auto mesh = MeshData{};
+    mesh.vertices.reserve(24u);
+    mesh.indices.reserve(36u);
+
+    push_face(
+        mesh,
+        {-half, -half, half},
+        {half, -half, half},
+        {half, half, half},
+        {-half, half, half},
+        {0.0f, 0.0f, 1.0f},
+        color
+    );
+    push_face(
+        mesh,
+        {half, -half, -half},
+        {-half, -half, -half},
+        {-half, half, -half},
+        {half, half, -half},
+        {0.0f, 0.0f, -1.0f},
+        color
+    );
+    push_face(
+        mesh,
+        {half, -half, half},
+        {half, -half, -half},
+        {half, half, -half},
+        {half, half, half},
+        {1.0f, 0.0f, 0.0f},
+        color
+    );
+    push_face(
+        mesh,
+        {-half, -half, -half},
+        {-half, -half, half},
+        {-half, half, half},
+        {-half, half, -half},
+        {-1.0f, 0.0f, 0.0f},
+        color
+    );
+    push_face(
+        mesh,
+        {-half, half, half},
+        {half, half, half},
+        {half, half, -half},
+        {-half, half, -half},
+        {0.0f, 1.0f, 0.0f},
+        color
+    );
+    push_face(
+        mesh,
+        {-half, -half, -half},
+        {half, -half, -half},
+        {half, -half, half},
+        {-half, -half, half},
+        {0.0f, -1.0f, 0.0f},
+        color
+    );
+
+    return mesh;
+}
+
+auto make_uv_sphere(const f32 radius, const u32 slices_raw, const u32 stacks_raw, const Vec4 color)
+    -> MeshData
+{
+    const auto slices = std::max(3u, slices_raw);
+    const auto stacks = std::max(2u, stacks_raw);
+    const auto safe_radius = std::max(0.0f, radius);
+    auto mesh = MeshData{};
+    mesh.vertices.reserve(static_cast<usize>(slices + 1u) * static_cast<usize>(stacks + 1u));
+    mesh.indices.reserve(static_cast<usize>(slices) * static_cast<usize>(stacks) * 6u);
+
+    for (u32 stack = 0; stack <= stacks; ++stack)
+    {
+        const auto v = static_cast<f32>(stack) / static_cast<f32>(stacks);
+        const auto phi = std::numbers::pi_v<f32> * v;
+        const auto sin_phi = std::sin(phi);
+        const auto cos_phi = std::cos(phi);
+        for (u32 slice = 0; slice <= slices; ++slice)
+        {
+            const auto u = static_cast<f32>(slice) / static_cast<f32>(slices);
+            const auto theta = 2.0f * std::numbers::pi_v<f32> * u;
+            const auto normal = Vec3{
+                sin_phi * std::cos(theta),
+                sin_phi * std::sin(theta),
+                cos_phi,
+            };
+            mesh.vertices.push_back(
+                Vertex{.position = normal * safe_radius, .normal = normal, .color = color}
+            );
+        }
+    }
+
+    for (u32 stack = 0; stack < stacks; ++stack)
+    {
+        for (u32 slice = 0; slice < slices; ++slice)
+        {
+            const auto row0 = stack * (slices + 1u);
+            const auto row1 = (stack + 1u) * (slices + 1u);
+            const auto a = row0 + slice;
+            const auto b = row0 + slice + 1u;
+            const auto c = row1 + slice;
+            const auto d = row1 + slice + 1u;
+            mesh.indices.insert(mesh.indices.end(), {a, c, b, b, c, d});
+        }
+    }
+
+    return mesh;
+}
+
+auto bounds_of(const MeshData& mesh) -> Bounds
+{
+    if (mesh.vertices.empty())
+    {
+        return {};
+    }
+
+    auto min_value = Vec3{std::numeric_limits<f32>::max()};
+    auto max_value = Vec3{std::numeric_limits<f32>::lowest()};
+    for (const auto& vertex : mesh.vertices)
+    {
+        min_value = glm::min(min_value, vertex.position);
+        max_value = glm::max(max_value, vertex.position);
+    }
+    return Bounds{.min = min_value, .max = max_value};
+}
+
+auto triangle_count(const MeshData& mesh) noexcept -> usize
+{
+    return mesh.indices.size() / 3u;
+}
+
+auto has_valid_indices(const MeshData& mesh) noexcept -> bool
+{
+    return std::ranges::all_of(
+        mesh.indices, [&](const u32 index) -> bool { return index < mesh.vertices.size(); }
+    );
+}
+}  // namespace ds_vk

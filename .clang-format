@@ -1,0 +1,82 @@
+# ---- Base style ----
+BasedOnStyle: LLVM
+Language: Cpp
+
+# ---- Indentation ----
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+
+# ---- Braces (Allman style) ----
+BreakBeforeBraces: Allman
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeCatch: true
+  BeforeElse: true
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+
+# ---- Line breaking ----
+ColumnLimit: 100
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+
+# ---- Control statements ----
+AlwaysBreakAfterReturnType: None
+AlwaysBreakTemplateDeclarations: Yes
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeTernaryOperators: true
+
+# ---- Spacing ----
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceInEmptyParentheses: false
+SpacesInAngles: false
+SpaceAfterCStyleCast: true
+SpacesBeforeTrailingComments: 2
+
+# ---- Alignment ----
+AlignAfterOpenBracket: BlockIndent
+AlignOperands: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignTrailingComments: true
+
+# ---- Switch / case ----
+IndentCaseLabels: true
+IndentCaseBlocks: true
+
+# ---- Pointer & reference style ----
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+
+# ---- Includes ----
+SortIncludes: true
+IncludeBlocks: Regroup
+
+# ---- Comments ----
+ReflowComments: true
+CommentPragmas: '^ IWYU pragma:'
+
+# ---- Preprocessor ----
+IndentPPDirectives: AfterHash
+
+# ---- C++ specifics ----
+Cpp11BracedListStyle: true
+Standard: Latest
+
+# --- Disable Bin Packing ---
+BinPackParameters: false
+BinPackArguments: false

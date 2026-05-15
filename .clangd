@@ -1,0 +1,18 @@
+# Keep Neovim/clangd focused on the framework and app code. Vendored
+# dependencies are still parsed when included, but they are not background
+# indexed as separate translation units.
+CompileFlags:
+  CompilationDatabase: build
+
+Index:
+  Background: Build
+
+Completion:
+  AllScopes: No
+
+---
+If:
+  PathMatch: external/.*
+
+Index:
+  Background: Skip
