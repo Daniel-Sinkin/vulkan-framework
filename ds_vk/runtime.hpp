@@ -245,6 +245,19 @@ struct HdrTextureLoadConfig
     f32 exposure{1.0f};
 };
 
+struct MeshReserveConfig
+{
+    MeshHandle mesh{};
+    usize vertex_capacity{};
+    usize index_capacity{};
+    MeshVertexFormat vertex_format{MeshVertexFormat::standard};
+};
+
+struct MeshUpdateConfig
+{
+    bool validate_indices{};
+};
+
 struct KeyboardModifiers
 {
     bool shift{};
@@ -288,6 +301,8 @@ struct FrameContext
     VmaAllocator allocator{VK_NULL_HANDLE};
     VkExtent2D extent{};
     u32 frame_index{};
+    u32 swapchain_image_index{};
+    u32 swapchain_image_count{};
     f32 dt_seconds{};
     Camera& camera;
     DrawList& draw;
@@ -397,6 +412,14 @@ class Runtime
 
     // clang-format off
     [[nodiscard]] auto upload_mesh(const MeshData& mesh)                                                     -> MeshHandle;
+    [[nodiscard]] auto upload_mesh(const PositionNormalMeshData& mesh)                                       -> MeshHandle;
+    [[nodiscard]] auto upload_mesh(const QuantizedPositionNormalMeshData& mesh)                              -> MeshHandle;
+    [[nodiscard]] auto reserve_mesh_capacity(const MeshReserveConfig& cfg)                                   -> MeshHandle;
+    // Reuses existing buffers when capacity permits. Callers must avoid updating a handle
+    // still used by in-flight command buffers.
+    [[nodiscard]] auto update_mesh(MeshHandle handle, const MeshData& mesh, const MeshUpdateConfig& cfg = {})                        -> MeshHandle;
+    [[nodiscard]] auto update_mesh(MeshHandle handle, const PositionNormalMeshData& mesh, const MeshUpdateConfig& cfg = {})          -> MeshHandle;
+    [[nodiscard]] auto update_mesh(MeshHandle handle, const QuantizedPositionNormalMeshData& mesh, const MeshUpdateConfig& cfg = {}) -> MeshHandle;
     [[nodiscard]] auto replace_mesh(MeshHandle handle, const MeshData& mesh)                                 -> MeshHandle;
     [[nodiscard]] auto load_texture(const std::filesystem::path& path, const TextureLoadConfig& config = {}) -> TextureHandle;
     [[nodiscard]] auto load_hdr_texture(

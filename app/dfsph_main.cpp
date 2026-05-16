@@ -52,8 +52,11 @@ constexpr u32 k_min_surface_cache_version{1u};
 constexpr auto k_surface_frame_dir = "frames";
 constexpr auto k_gzip_read_chunk_size = 1zu << 20zu;
 constexpr auto k_max_surface_preload_workers = 8zu;
-constexpr auto k_position_quantization_max = 65535.0f;
-constexpr auto k_normal_quantization_max = 32767.0f;
+constexpr auto k_surface_stream_slot_count = 8zu;
+constexpr auto k_surface_stream_target_ahead = 4zu;
+constexpr auto k_surface_stream_upload_budget = 2zu;
+constexpr auto k_surface_mesh_unavailable = u8{0u};
+constexpr auto k_surface_mesh_available = u8{1u};
 
 struct ParticleSample
 {
@@ -77,7 +80,9 @@ struct SurfaceFrame
 {
     u32 index{};
     f32 time_seconds{};
-    MeshData mesh{};
+    PositionNormalMeshData mesh{};
+    QuantizedPositionNormalMeshData quantized_mesh{};
+    bool quantized{};
 };
 
 struct SurfaceFrameLoadResult
@@ -92,6 +97,16 @@ struct SurfacePreloadWorkerStats
     usize loaded_frames{};
     usize max_vertices{};
     usize max_triangles{};
+};
+
+struct SurfaceStreamSlot
+{
+    MeshHandle mesh{};
+    usize frame_index{k_invalid_index};
+    usize last_used{};
+    usize last_draw_runtime_frame{k_invalid_index};
+    bool warmup{};
+    u8 available{k_surface_mesh_unavailable};
 };
 
 struct ProfileTimer
@@ -211,6 +226,24 @@ struct DfsphSceneConfig
                 },
         },
         DfsphSceneConfig{
+            .id = "dambreak_150k_300f_dfsph_v1",
+            .label = "Dam Break 150k",
+            .vtk_dir = "dfsph/dambreak_150k_300f_dfsph_v1/vtk",
+            .surface_dir = "dfsph/dambreak_150k_300f_dfsph_v1/surface",
+            .bounds = {.min = {-3.5f, -2.2f, -0.05f}, .max = {5.3f, 3.5f, 3.2f}},
+            .particle_radius = 0.025f,
+            .support_radius = 0.100f,
+            .default_velocity_stride = 120zu,
+            .default_max_velocity_arrows = 1600zu,
+            .camera =
+                {
+                    .pivot = {0.75f, 0.45f, 1.45f},
+                    .distance = 10.0f,
+                    .yaw = glm::radians(42.0f),
+                    .pitch = glm::radians(24.0f),
+                },
+        },
+        DfsphSceneConfig{
             .id = "twoway_rigidbody_50k_4bodies_dfsph_v1",
             .label = "Two-Way Rigid Bodies 50k",
             .vtk_dir = "dfsph/twoway_rigidbody_50k_4bodies_dfsph_v1/vtk",
@@ -304,7 +337,7 @@ auto print_usage(const char* program) -> void
               << " [--smoke-frames N] [--screenshot PATH] [--hide-ui]"
                  " [--transparent-screenshot] [--scene-id ID] [--show-mesh]"
                  " [--hide-mesh] [--show-particles] [--hide-particles]"
-                 " [--playback-speed X] [--profile]\n";
+                 " [--playback-speed X] [--loop] [--profile]\n";
     std::cerr << "available scene IDs:\n";
     for (const auto& scene : available_scenes())
     {
@@ -721,6 +754,34 @@ rigid_body_vtk_path_for_frame(const std::filesystem::path& vtk_dir, u32 body_id,
     return value * glm::inversesqrt(length_squared);
 }
 
+[[nodiscard]] auto decode_surface_normal_component(i16 value) noexcept -> f32
+{
+    constexpr auto inv_max_i16 = 1.0f / static_cast<f32>(std::numeric_limits<i16>::max());
+    return std::clamp(static_cast<f32>(value) * inv_max_i16, -1.0f, 1.0f);
+}
+
+[[nodiscard]] auto oct_sign(f32 value) noexcept -> f32
+{
+    return value < 0.0f ? -1.0f : 1.0f;
+}
+
+[[nodiscard]] auto encode_surface_normal_oct8(Vec3 normal) noexcept -> std::array<u8, 2>
+{
+    const auto normalized = finite_normal_or_z(normal);
+    const auto l1_norm = std::abs(normalized.x) + std::abs(normalized.y) + std::abs(normalized.z);
+    Vec2 encoded{normalized.x / l1_norm, normalized.y / l1_norm};
+    if (normalized.z < 0.0f)
+    {
+        const Vec2 folded{
+            (1.0f - std::abs(encoded.y)) * oct_sign(encoded.x),
+            (1.0f - std::abs(encoded.x)) * oct_sign(encoded.y),
+        };
+        encoded = folded;
+    }
+    encoded = encoded * 0.5f + Vec2{0.5f};
+    return {color_channel_to_u8(encoded.x), color_channel_to_u8(encoded.y)};
+}
+
 [[nodiscard]] auto read_gzip_file(const std::filesystem::path& path) -> std::vector<u8>
 {
     const auto path_string = path.string();
@@ -797,14 +858,31 @@ template <typename ReadBytes>
     };
 }
 
-[[nodiscard]] auto decode_position_component(u16 value, f32 origin, f32 extent) noexcept -> f32
+[[nodiscard]] auto surface_vertex_count(const SurfaceFrame& frame) noexcept -> usize
 {
-    return origin + extent * (static_cast<f32>(value) / k_position_quantization_max);
+    return frame.quantized ? frame.quantized_mesh.vertices.size() : frame.mesh.vertices.size();
 }
 
-[[nodiscard]] auto decode_normal_component(i16 value) noexcept -> f32
+[[nodiscard]] auto surface_index_count(const SurfaceFrame& frame) noexcept -> usize
 {
-    return static_cast<f32>(value) / k_normal_quantization_max;
+    return frame.quantized ? frame.quantized_mesh.indices.size() : frame.mesh.indices.size();
+}
+
+[[nodiscard]] auto surface_vertex_format(const SurfaceFrame& frame) noexcept -> MeshVertexFormat
+{
+    return frame.quantized ? MeshVertexFormat::quantized_position_normal
+                           : MeshVertexFormat::position_normal;
+}
+
+[[nodiscard]] auto surface_frame_byte_size(const SurfaceFrame& frame) noexcept -> usize
+{
+    if (frame.quantized)
+    {
+        return frame.quantized_mesh.vertices.size() * sizeof(QuantizedPositionNormalVertex)
+               + frame.quantized_mesh.indices.size() * sizeof(u32);
+    }
+    return frame.mesh.vertices.size() * sizeof(PositionNormalVertex)
+           + frame.mesh.indices.size() * sizeof(u32);
 }
 
 template <typename ReadBytes>
@@ -833,26 +911,27 @@ template <typename ReadBytes>
     frame.time_seconds = read_surface_scalar<f32>(read_bytes);
     const auto vertex_count = read_surface_scalar<u32>(read_bytes);
     const auto index_count = read_surface_scalar<u32>(read_bytes);
-    frame.mesh.vertices.resize(static_cast<usize>(vertex_count));
-    frame.mesh.indices.resize(static_cast<usize>(index_count));
 
     if (version == 1u)
     {
+        frame.mesh.vertices.resize(static_cast<usize>(vertex_count));
+        frame.mesh.indices.resize(static_cast<usize>(index_count));
         for (auto& vertex : frame.mesh.vertices)
         {
-            vertex = Vertex{
+            vertex = PositionNormalVertex{
                 .position = read_surface_vec3(read_bytes),
                 .normal = finite_normal_or_z(read_surface_vec3(read_bytes)),
-                .color = Color::white,
-                .texcoord = {0.0f, 0.0f},
             };
         }
     }
     else
     {
-        const auto bounds_min = read_surface_vec3(read_bytes);
-        const auto extent = glm::max(read_surface_vec3(read_bytes), Vec3{0.0f});
-        for (auto& vertex : frame.mesh.vertices)
+        frame.quantized = true;
+        frame.quantized_mesh.decode_origin = read_surface_vec3(read_bytes);
+        frame.quantized_mesh.decode_extent = glm::max(read_surface_vec3(read_bytes), Vec3{0.0f});
+        frame.quantized_mesh.vertices.resize(static_cast<usize>(vertex_count));
+        frame.quantized_mesh.indices.resize(static_cast<usize>(index_count));
+        for (auto& vertex : frame.quantized_mesh.vertices)
         {
             const auto qx = read_surface_scalar<u16>(read_bytes);
             const auto qy = read_surface_scalar<u16>(read_bytes);
@@ -860,25 +939,21 @@ template <typename ReadBytes>
             const auto nx = read_surface_scalar<i16>(read_bytes);
             const auto ny = read_surface_scalar<i16>(read_bytes);
             const auto nz = read_surface_scalar<i16>(read_bytes);
-            vertex = Vertex{
-                .position =
-                    {
-                        decode_position_component(qx, bounds_min.x, extent.x),
-                        decode_position_component(qy, bounds_min.y, extent.y),
-                        decode_position_component(qz, bounds_min.z, extent.z),
-                    },
-                .normal = finite_normal_or_z({
-                    decode_normal_component(nx),
-                    decode_normal_component(ny),
-                    decode_normal_component(nz),
-                }),
-                .color = Color::white,
-                .texcoord = {0.0f, 0.0f},
+            const Vec3 normal{
+                decode_surface_normal_component(nx),
+                decode_surface_normal_component(ny),
+                decode_surface_normal_component(nz),
+            };
+            vertex = QuantizedPositionNormalVertex{
+                .position = {qx, qy, qz, 0u},
+                .normal_oct = encode_surface_normal_oct8(normal),
+                .reserved = {},
             };
         }
     }
 
-    for (auto& index : frame.mesh.indices)
+    auto& indices = frame.quantized ? frame.quantized_mesh.indices : frame.mesh.indices;
+    for (auto& index : indices)
     {
         index = read_surface_scalar<u32>(read_bytes);
         if (index >= vertex_count)
@@ -886,8 +961,8 @@ template <typename ReadBytes>
             throw std::runtime_error("surface cache index out of range");
         }
     }
-    if (frame.mesh.vertices.empty() or frame.mesh.indices.empty()
-        or frame.mesh.indices.size() % 3zu != 0zu)
+    if (surface_vertex_count(frame) == 0zu or surface_index_count(frame) == 0zu
+        or surface_index_count(frame) % 3zu != 0zu)
     {
         throw std::runtime_error("surface cache frame has invalid mesh shape");
     }
@@ -1410,6 +1485,7 @@ struct DfsphPlaybackConfig
     f32 playback_speed{1.0f};
     bool show_particles{true};
     bool show_surface_mesh{};
+    bool loop_playback{};
     bool profile{};
 };
 
@@ -1441,12 +1517,18 @@ struct DfsphProfile
     ProfileCounter surface_decompress{};
     ProfileCounter surface_decode{};
     ProfileCounter surface_upload{};
+    ProfileCounter surface_upload_warmup{};
     ProfileCounter surface_total{};
+    ProfileCounter surface_total_warmup{};
     ProfileCounter surface_preload{};
     usize surface_frames{};
+    usize surface_warmup_frames{};
     usize surface_preloaded_frames{};
     usize max_surface_vertices{};
     usize max_surface_triangles{};
+    usize max_surface_upload_frame{k_invalid_index};
+    usize max_surface_upload_vertices{};
+    usize max_surface_upload_triangles{};
 
     auto add_runtime(const RuntimeStats& stats) noexcept -> void
     {
@@ -1468,6 +1550,7 @@ class DfsphPlaybackApp
           show_surface_mesh_(cfg.show_surface_mesh), profile_enabled_(cfg.profile)
     {
         playback_speed_ = cfg.playback_speed;
+        loop_playback_ = cfg.loop_playback;
     }
 
     auto setup(Runtime& runtime) -> void
@@ -1485,6 +1568,18 @@ class DfsphPlaybackApp
 
     auto update(FrameContext& frame, f32 dt_seconds) -> void
     {
+        if (profile_enabled_)
+        {
+            if (skip_next_runtime_profile_sample_)
+            {
+                skip_next_runtime_profile_sample_ = false;
+            }
+            else
+            {
+                profile_.add_runtime(frame.stats);
+            }
+        }
+
         poll_surface_mesh_preload();
         if (pending_scene_index_.has_value())
         {
@@ -1498,12 +1593,19 @@ class DfsphPlaybackApp
         {
             paused_ = !paused_;
         }
-        if (profile_enabled_)
-        {
-            profile_.add_runtime(frame.stats);
-        }
 
         configure_lighting(frame.draw);
+        if (!frames_.empty() and runtime_ != nullptr and show_surface_mesh_)
+        {
+            sync_surface_mesh(
+                *runtime_,
+                current_frame_,
+                frame.frame_index,
+                frame.swapchain_image_count,
+                1zu,
+                k_surface_stream_upload_budget
+            );
+        }
         update_playback(dt_seconds);
 
         frame.draw.draw_mesh({
@@ -1542,7 +1644,14 @@ class DfsphPlaybackApp
             sync_rigid_body_meshes(*runtime_, current_frame_);
             if (show_surface_mesh_)
             {
-                sync_surface_mesh(*runtime_, current_frame_);
+                sync_surface_mesh(
+                    *runtime_,
+                    current_frame_,
+                    frame.frame_index,
+                    frame.swapchain_image_count,
+                    k_surface_stream_target_ahead,
+                    k_surface_stream_upload_budget
+                );
             }
         }
         draw_surface_mesh(frame.draw);
@@ -1642,7 +1751,12 @@ class DfsphPlaybackApp
                 auto frame_i = static_cast<int>(current_frame_);
                 if (ImGui::SliderInt("Frame", &frame_i, 0, static_cast<int>(frames_.size() - 1zu)))
                 {
-                    current_frame_ = static_cast<usize>(std::max(0, frame_i));
+                    const auto selected_frame = static_cast<usize>(std::max(0, frame_i));
+                    if (selected_frame != current_frame_)
+                    {
+                        invalidate_surface_mesh_slots();
+                    }
+                    current_frame_ = selected_frame;
                     playback_seconds_ = static_cast<f32>(current_frame_) * k_frame_dt;
                     playback_accumulator_ = 0.0f;
                     mark_selection_dirty();
@@ -1783,6 +1897,11 @@ class DfsphPlaybackApp
         std::cout << std::format(
             "[dfsph-profile] surface_preloaded_frames={}\n", profile_.surface_preloaded_frames
         );
+        std::cout << std::format(
+            "[dfsph-profile] surface_cpu_cache_bytes={} ({:.3f} GiB)\n",
+            surface_preload_cpu_bytes_,
+            static_cast<f64>(surface_preload_cpu_bytes_) / (1024.0 * 1024.0 * 1024.0)
+        );
         print_counter("frame", profile_.runtime_frame);
         print_counter("update", profile_.runtime_update);
         print_counter("render", profile_.runtime_render);
@@ -1790,8 +1909,22 @@ class DfsphPlaybackApp
         print_counter("surface_gzip", profile_.surface_decompress);
         print_counter("surface_decode", profile_.surface_decode);
         print_counter("surface_upload", profile_.surface_upload);
+        print_counter("surface_warmup", profile_.surface_upload_warmup);
         print_counter("surface_total", profile_.surface_total);
+        print_counter("surface_total_warm", profile_.surface_total_warmup);
         print_counter("surface_preload", profile_.surface_preload);
+        std::cout << std::format(
+            "[dfsph-profile] surface_warmup_frames={}\n", profile_.surface_warmup_frames
+        );
+        if (profile_.max_surface_upload_frame != k_invalid_index)
+        {
+            std::cout << std::format(
+                "[dfsph-profile] max_surface_upload_frame={} vertices={} triangles={}\n",
+                profile_.max_surface_upload_frame,
+                profile_.max_surface_upload_vertices,
+                profile_.max_surface_upload_triangles
+            );
+        }
     }
 
   private:
@@ -1813,27 +1946,28 @@ class DfsphPlaybackApp
             return;
         }
 
-        playback_accumulator_ += dt_seconds * std::max(0.0f, playback_speed_);
-        constexpr auto max_steps_per_update = 12zu;
-        auto steps = 0zu;
-        while (playback_accumulator_ >= k_frame_dt and steps < max_steps_per_update)
+        const auto scaled_dt = dt_seconds * std::max(0.0f, playback_speed_);
+        // Clamp catch-up pressure so slow frames stall playback instead of skipping frames.
+        playback_accumulator_ += std::min(scaled_dt, k_frame_dt);
+        if (playback_accumulator_ >= k_frame_dt)
         {
+            const auto next_frame = next_playback_frame();
+            if (!next_frame.has_value())
+            {
+                paused_ = true;
+                playback_accumulator_ = 0.0f;
+                playback_seconds_ = static_cast<f32>(current_frame_) * k_frame_dt;
+                return;
+            }
+            if (surface_playback_waiting_for(*next_frame))
+            {
+                playback_accumulator_ = k_frame_dt;
+                playback_seconds_ = static_cast<f32>(current_frame_) * k_frame_dt;
+                return;
+            }
+
             playback_accumulator_ -= k_frame_dt;
-            ++steps;
-            if (current_frame_ + 1zu >= frames_.size())
-            {
-                if (!loop_playback_)
-                {
-                    paused_ = true;
-                    playback_accumulator_ = 0.0f;
-                    break;
-                }
-                current_frame_ = 0zu;
-            }
-            else
-            {
-                ++current_frame_;
-            }
+            current_frame_ = *next_frame;
             mark_selection_dirty();
         }
         playback_seconds_ = static_cast<f32>(current_frame_) * k_frame_dt + playback_accumulator_;
@@ -2026,6 +2160,80 @@ class DfsphPlaybackApp
         return particle_radius_;
     }
 
+    [[nodiscard]] auto next_playback_frame() const noexcept -> std::optional<usize>
+    {
+        if (frames_.empty())
+        {
+            return std::nullopt;
+        }
+        if (current_frame_ + 1zu < frames_.size())
+        {
+            return current_frame_ + 1zu;
+        }
+        if (loop_playback_)
+        {
+            return 0zu;
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] auto surface_stream_frame_at_offset(usize start, usize offset) const noexcept
+        -> std::optional<usize>
+    {
+        if (frames_.empty())
+        {
+            return std::nullopt;
+        }
+        if (loop_playback_)
+        {
+            return (start + offset) % frames_.size();
+        }
+        if (start + offset >= frames_.size())
+        {
+            return std::nullopt;
+        }
+        return start + offset;
+    }
+
+    [[nodiscard]] auto surface_frame_cached(usize frame_index) const noexcept -> bool
+    {
+        return std::ranges::any_of(
+            surface_stream_slots_,
+            [frame_index](const SurfaceStreamSlot& slot) -> bool
+            {
+                return slot.available == k_surface_mesh_available
+                       and slot.frame_index == frame_index;
+            }
+        );
+    }
+
+    [[nodiscard]] auto surface_playback_waiting_for(usize frame_index) const noexcept -> bool
+    {
+        return show_surface_mesh_ and surface_cache_present_ and !surface_frame_cached(frame_index);
+    }
+
+    auto invalidate_surface_mesh_slots() -> void
+    {
+        for (auto& slot : surface_stream_slots_)
+        {
+            slot.frame_index = k_invalid_index;
+            slot.available = k_surface_mesh_unavailable;
+            slot.warmup = false;
+        }
+        surface_mesh_slot_ = k_invalid_index;
+        surface_frame_available_ = false;
+    }
+
+    auto ensure_surface_stream_slots() -> void
+    {
+        if (surface_stream_slots_.size() >= k_surface_stream_slot_count)
+        {
+            return;
+        }
+
+        surface_stream_slots_.resize(k_surface_stream_slot_count);
+    }
+
     auto load_scene(usize scene_index, Runtime& runtime) -> void
     {
         const auto scenes = available_scenes();
@@ -2043,7 +2251,8 @@ class DfsphPlaybackApp
         velocity_vectors_.clear();
         rigid_bodies_.clear();
         selected_particle_ids_.clear();
-        cached_surface_frame_index_ = k_invalid_index;
+        invalidate_surface_mesh_slots();
+        surface_mesh_slot_ = 0zu;
         surface_cache_present_ = false;
         surface_frame_available_ = false;
         surface_vertex_count_ = 0zu;
@@ -2106,7 +2315,9 @@ class DfsphPlaybackApp
         surface_preload_result_max_triangles_ = 0zu;
         surface_preload_finished_ = false;
         surface_preloaded_frames_ = 0zu;
+        surface_preload_cpu_bytes_ = 0zu;
         surface_preload_ms_ = 0.0f;
+        surface_mesh_capacity_prewarmed_ = false;
         surface_preload_error_.clear();
     }
 
@@ -2131,7 +2342,9 @@ class DfsphPlaybackApp
         surface_preload_result_max_vertices_ = 0zu;
         surface_preload_result_max_triangles_ = 0zu;
         surface_preloaded_frames_ = 0zu;
+        surface_preload_cpu_bytes_ = 0zu;
         surface_preload_ms_ = 0.0f;
+        surface_mesh_capacity_prewarmed_ = false;
         surface_preload_error_.clear();
         surface_preload_started_ = std::chrono::steady_clock::now();
 
@@ -2246,9 +2459,9 @@ class DfsphPlaybackApp
                                     }
 
                                     stats.max_vertices =
-                                        std::max(stats.max_vertices, frame.mesh.vertices.size());
+                                        std::max(stats.max_vertices, surface_vertex_count(frame));
                                     stats.max_triangles = std::max(
-                                        stats.max_triangles, frame.mesh.indices.size() / 3zu
+                                        stats.max_triangles, surface_index_count(frame) / 3zu
                                     );
                                     preloaded_surface_frames_[frame_slot] = std::move(frame);
                                     ++stats.loaded_frames;
@@ -2339,6 +2552,68 @@ class DfsphPlaybackApp
             profile_.max_surface_triangles =
                 std::max(profile_.max_surface_triangles, surface_preload_result_max_triangles_);
         }
+        if (runtime_ != nullptr)
+        {
+            prewarm_surface_mesh_capacity(*runtime_);
+        }
+    }
+
+    auto prewarm_surface_mesh_capacity(Runtime& runtime) -> void
+    {
+        if (surface_mesh_capacity_prewarmed_ or preloaded_surface_frames_.empty())
+        {
+            return;
+        }
+
+        auto largest_vertex_capacity = 0zu;
+        auto largest_index_capacity = 0zu;
+        auto surface_preload_cpu_bytes = 0zu;
+        auto vertex_format = MeshVertexFormat::position_normal;
+        auto found_frame = false;
+        for (const auto& frame : preloaded_surface_frames_)
+        {
+            if (!frame.has_value())
+            {
+                continue;
+            }
+            if (!found_frame)
+            {
+                vertex_format = surface_vertex_format(*frame);
+                found_frame = true;
+            }
+
+            largest_vertex_capacity =
+                std::max(largest_vertex_capacity, surface_vertex_count(*frame));
+            largest_index_capacity = std::max(largest_index_capacity, surface_index_count(*frame));
+            surface_preload_cpu_bytes += surface_frame_byte_size(*frame);
+        }
+        if (largest_vertex_capacity == 0zu or largest_index_capacity == 0zu)
+        {
+            return;
+        }
+
+        ensure_surface_stream_slots();
+
+        for (auto& slot : surface_stream_slots_)
+        {
+            slot.mesh = runtime.reserve_mesh_capacity({
+                .mesh = slot.mesh,
+                .vertex_capacity = largest_vertex_capacity,
+                .index_capacity = largest_index_capacity,
+                .vertex_format = vertex_format,
+            });
+            slot.frame_index = k_invalid_index;
+            slot.available = k_surface_mesh_unavailable;
+            slot.warmup = false;
+        }
+
+        surface_frame_available_ = false;
+        surface_preload_cpu_bytes_ = surface_preload_cpu_bytes;
+        surface_mesh_capacity_prewarmed_ = true;
+        if (show_surface_mesh_ and !frames_.empty())
+        {
+            prefill_surface_stream(runtime, current_frame_);
+        }
     }
 
     [[nodiscard]] auto surface_preload_running() const noexcept -> bool
@@ -2389,16 +2664,155 @@ class DfsphPlaybackApp
         }
     }
 
-    auto sync_surface_mesh(Runtime& runtime, usize frame_index) -> void
+    [[nodiscard]] auto surface_stream_slot_index(usize frame_index) const noexcept
+        -> std::optional<usize>
     {
-        if (!surface_cache_present_)
+        for (auto slot = 0zu; slot < surface_stream_slots_.size(); ++slot)
         {
-            surface_frame_available_ = false;
-            return;
+            if (surface_stream_slots_[slot].available == k_surface_mesh_available
+                and surface_stream_slots_[slot].frame_index == frame_index)
+            {
+                return slot;
+            }
         }
-        if (cached_surface_frame_index_ == frame_index and surface_frame_available_)
+        return std::nullopt;
+    }
+
+    [[nodiscard]] auto surface_slot_safe_to_update(
+        const SurfaceStreamSlot& slot, u32 runtime_frame_index, u32 swapchain_image_count
+    ) const noexcept -> bool
+    {
+        if (slot.last_draw_runtime_frame == k_invalid_index)
         {
-            return;
+            return true;
+        }
+        const auto current_runtime_frame = static_cast<usize>(runtime_frame_index);
+        const auto in_flight_frame_count = std::max(1zu, static_cast<usize>(swapchain_image_count));
+        return current_runtime_frame >= slot.last_draw_runtime_frame + in_flight_frame_count;
+    }
+
+    [[nodiscard]] auto
+    surface_stream_window_contains(usize frame_index, usize window_start) const noexcept -> bool
+    {
+        for (auto offset = 0zu; offset < k_surface_stream_slot_count; ++offset)
+        {
+            const auto window_frame = surface_stream_frame_at_offset(window_start, offset);
+            if (window_frame.has_value() and *window_frame == frame_index)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] auto choose_surface_stream_slot(
+        usize window_start, u32 runtime_frame_index, u32 swapchain_image_count
+    ) const noexcept -> std::optional<usize>
+    {
+        for (auto slot = 0zu; slot < surface_stream_slots_.size(); ++slot)
+        {
+            const auto& candidate = surface_stream_slots_[slot];
+            if (candidate.available == k_surface_mesh_unavailable
+                and surface_slot_safe_to_update(
+                    candidate, runtime_frame_index, swapchain_image_count
+                ))
+            {
+                return slot;
+            }
+        }
+
+        auto best_slot = std::optional<usize>{};
+        auto best_last_used = std::numeric_limits<usize>::max();
+        for (auto slot = 0zu; slot < surface_stream_slots_.size(); ++slot)
+        {
+            const auto& candidate = surface_stream_slots_[slot];
+            if (!surface_slot_safe_to_update(candidate, runtime_frame_index, swapchain_image_count))
+            {
+                continue;
+            }
+            if (candidate.frame_index != k_invalid_index
+                and surface_stream_window_contains(candidate.frame_index, window_start))
+            {
+                continue;
+            }
+            if (!best_slot.has_value() or candidate.last_used < best_last_used)
+            {
+                best_slot = slot;
+                best_last_used = candidate.last_used;
+            }
+        }
+        return best_slot;
+    }
+
+    auto upload_surface_frame(
+        Runtime& runtime,
+        const SurfaceFrame& frame,
+        SurfaceStreamSlot& slot,
+        f32 read_ms,
+        f32 decompress_ms,
+        f32 decode_ms,
+        const ProfileTimer& total_timer,
+        bool warmup
+    ) -> void
+    {
+        ProfileTimer upload_timer{};
+        if (frame.quantized)
+        {
+            slot.mesh = runtime.update_mesh(
+                slot.mesh, frame.quantized_mesh, MeshUpdateConfig{.validate_indices = false}
+            );
+        }
+        else
+        {
+            slot.mesh = runtime.update_mesh(
+                slot.mesh, frame.mesh, MeshUpdateConfig{.validate_indices = false}
+            );
+        }
+
+        const auto upload_ms = upload_timer.elapsed_ms();
+        if (profile_enabled_)
+        {
+            if (warmup)
+            {
+                ++profile_.surface_warmup_frames;
+                profile_.surface_upload_warmup.add(upload_ms);
+                profile_.surface_total_warmup.add(total_timer.elapsed_ms());
+            }
+            else
+            {
+                if (upload_ms > profile_.surface_upload.max_ms)
+                {
+                    profile_.max_surface_upload_frame = static_cast<usize>(frame.index);
+                    profile_.max_surface_upload_vertices = surface_vertex_count(frame);
+                    profile_.max_surface_upload_triangles = surface_index_count(frame) / 3zu;
+                }
+                ++profile_.surface_frames;
+                profile_.surface_read.add(read_ms);
+                profile_.surface_decompress.add(decompress_ms);
+                profile_.surface_decode.add(decode_ms);
+                profile_.surface_upload.add(upload_ms);
+                profile_.surface_total.add(total_timer.elapsed_ms());
+            }
+            profile_.max_surface_vertices =
+                std::max(profile_.max_surface_vertices, surface_vertex_count(frame));
+            profile_.max_surface_triangles =
+                std::max(profile_.max_surface_triangles, surface_index_count(frame) / 3zu);
+        }
+    }
+
+    [[nodiscard]] auto cache_surface_frame(
+        Runtime& runtime,
+        usize frame_index,
+        usize window_start,
+        u32 runtime_frame_index,
+        u32 swapchain_image_count,
+        bool warmup
+    ) -> std::optional<usize>
+    {
+        if (const auto slot = surface_stream_slot_index(frame_index); slot.has_value())
+        {
+            surface_stream_slots_[*slot].last_used = ++surface_stream_clock_;
+            return slot;
         }
         if (frame_index > static_cast<usize>(std::numeric_limits<u32>::max()))
         {
@@ -2406,10 +2820,124 @@ class DfsphPlaybackApp
                 std::format("surface frame index out of range: {}", frame_index)
             );
         }
+        if (frame_index >= preloaded_surface_frames_.size())
+        {
+            return std::nullopt;
+        }
+        const auto& preloaded_frame = preloaded_surface_frames_[frame_index];
+        if (!preloaded_frame.has_value())
+        {
+            return std::nullopt;
+        }
+        const auto slot =
+            choose_surface_stream_slot(window_start, runtime_frame_index, swapchain_image_count);
+        if (!slot.has_value())
+        {
+            return std::nullopt;
+        }
 
+        auto& stream_slot = surface_stream_slots_[*slot];
+        ProfileTimer total_timer{};
+        upload_surface_frame(
+            runtime, *preloaded_frame, stream_slot, 0.0f, 0.0f, 0.0f, total_timer, warmup
+        );
+        stream_slot.frame_index = frame_index;
+        stream_slot.available = k_surface_mesh_available;
+        stream_slot.warmup = warmup;
+        stream_slot.last_used = ++surface_stream_clock_;
+        return slot;
+    }
+
+    auto set_active_surface_slot(usize slot, u32 runtime_frame_index) -> void
+    {
+        if (slot >= surface_stream_slots_.size())
+        {
+            surface_frame_available_ = false;
+            return;
+        }
+        auto& stream_slot = surface_stream_slots_[slot];
+        const auto frame_index = stream_slot.frame_index;
+        if (stream_slot.available != k_surface_mesh_available
+            or frame_index >= preloaded_surface_frames_.size())
+        {
+            surface_frame_available_ = false;
+            return;
+        }
+
+        const auto& preloaded_frame = preloaded_surface_frames_[frame_index];
+        if (!preloaded_frame.has_value())
+        {
+            surface_frame_available_ = false;
+            return;
+        }
+
+        const auto& frame = preloaded_frame.value();
+        surface_mesh_slot_ = slot;
+        surface_vertex_count_ = surface_vertex_count(frame);
+        surface_triangle_count_ = surface_index_count(frame) / 3zu;
+        stream_slot.last_used = ++surface_stream_clock_;
+        stream_slot.last_draw_runtime_frame = static_cast<usize>(runtime_frame_index);
+        surface_frame_available_ = true;
+    }
+
+    auto prefetch_surface_stream(
+        Runtime& runtime,
+        usize window_start,
+        u32 runtime_frame_index,
+        u32 swapchain_image_count,
+        usize target_ahead,
+        usize upload_budget
+    ) -> void
+    {
+        auto uploads = 0zu;
+        const auto max_offset = std::min(target_ahead, k_surface_stream_slot_count - 1zu);
+        for (auto offset = 1zu; offset <= max_offset; ++offset)
+        {
+            const auto frame_index = surface_stream_frame_at_offset(window_start, offset);
+            if (!frame_index.has_value())
+            {
+                break;
+            }
+            if (surface_frame_cached(*frame_index))
+            {
+                continue;
+            }
+            const auto cached_slot = cache_surface_frame(
+                runtime,
+                *frame_index,
+                window_start,
+                runtime_frame_index,
+                swapchain_image_count,
+                false
+            );
+            if (!cached_slot.has_value())
+            {
+                break;
+            }
+            ++uploads;
+            if (uploads >= upload_budget)
+            {
+                break;
+            }
+        }
+    }
+
+    auto sync_surface_mesh(
+        Runtime& runtime,
+        usize frame_index,
+        u32 runtime_frame_index,
+        u32 swapchain_image_count,
+        usize target_ahead,
+        usize upload_budget
+    ) -> void
+    {
+        ensure_surface_stream_slots();
+        if (!surface_cache_present_)
+        {
+            surface_frame_available_ = false;
+            return;
+        }
         start_surface_mesh_preload();
-
-        cached_surface_frame_index_ = frame_index;
         if (!surface_preload_finished_)
         {
             surface_frame_available_ = false;
@@ -2417,15 +2945,11 @@ class DfsphPlaybackApp
             surface_triangle_count_ = 0zu;
             return;
         }
-        if (frame_index >= preloaded_surface_frames_.size())
-        {
-            surface_frame_available_ = false;
-            surface_vertex_count_ = 0zu;
-            surface_triangle_count_ = 0zu;
-            return;
-        }
-        const auto& preloaded_frame = preloaded_surface_frames_[frame_index];
-        if (!preloaded_frame.has_value())
+
+        const auto current_slot = cache_surface_frame(
+            runtime, frame_index, frame_index, runtime_frame_index, swapchain_image_count, false
+        );
+        if (!current_slot.has_value())
         {
             surface_frame_available_ = false;
             surface_vertex_count_ = 0zu;
@@ -2433,37 +2957,59 @@ class DfsphPlaybackApp
             return;
         }
 
-        ProfileTimer total_timer{};
-        upload_surface_frame(runtime, *preloaded_frame, 0.0f, 0.0f, 0.0f, total_timer);
+        set_active_surface_slot(*current_slot, runtime_frame_index);
+        prefetch_surface_stream(
+            runtime,
+            frame_index,
+            runtime_frame_index,
+            swapchain_image_count,
+            target_ahead,
+            upload_budget
+        );
     }
 
-    auto upload_surface_frame(
-        Runtime& runtime,
-        const SurfaceFrame& frame,
-        f32 read_ms,
-        f32 decompress_ms,
-        f32 decode_ms,
-        const ProfileTimer& total_timer
-    ) -> void
+    auto prefill_surface_stream(Runtime& runtime, usize start_frame) -> void
     {
-        surface_vertex_count_ = frame.mesh.vertices.size();
-        surface_triangle_count_ = frame.mesh.indices.size() / 3zu;
-        ProfileTimer upload_timer{};
-        surface_mesh_ = runtime.replace_mesh(surface_mesh_, frame.mesh);
-        const auto upload_ms = upload_timer.elapsed_ms();
-        surface_frame_available_ = true;
-        if (profile_enabled_)
+        if (!surface_cache_present_ or !surface_preload_finished_
+            or preloaded_surface_frames_.empty() or frames_.empty())
         {
-            ++profile_.surface_frames;
-            profile_.surface_read.add(read_ms);
-            profile_.surface_decompress.add(decompress_ms);
-            profile_.surface_decode.add(decode_ms);
-            profile_.surface_upload.add(upload_ms);
-            profile_.surface_total.add(total_timer.elapsed_ms());
-            profile_.max_surface_vertices =
-                std::max(profile_.max_surface_vertices, surface_vertex_count_);
-            profile_.max_surface_triangles =
-                std::max(profile_.max_surface_triangles, surface_triangle_count_);
+            return;
+        }
+
+        ensure_surface_stream_slots();
+
+        auto uploaded = 0zu;
+        const auto warmup_runtime_frame = std::numeric_limits<u32>::max();
+        constexpr auto warmup_swapchain_images = 1u;
+        for (auto offset = 0zu; offset < k_surface_stream_slot_count; ++offset)
+        {
+            const auto frame_index = surface_stream_frame_at_offset(start_frame, offset);
+            if (!frame_index.has_value())
+            {
+                break;
+            }
+            const auto cached_before = surface_frame_cached(*frame_index);
+            const auto cached_slot = cache_surface_frame(
+                runtime,
+                *frame_index,
+                start_frame,
+                warmup_runtime_frame,
+                warmup_swapchain_images,
+                true
+            );
+            if (!cached_slot.has_value())
+            {
+                break;
+            }
+            if (!cached_before)
+            {
+                ++uploaded;
+            }
+        }
+
+        if (uploaded > 0zu)
+        {
+            skip_next_runtime_profile_sample_ = true;
         }
     }
 
@@ -2473,9 +3019,14 @@ class DfsphPlaybackApp
         {
             return;
         }
+        if (surface_mesh_slot_ >= surface_stream_slots_.size()
+            or surface_stream_slots_[surface_mesh_slot_].available == k_surface_mesh_unavailable)
+        {
+            return;
+        }
 
         draw.draw_mesh({
-            .mesh = surface_mesh_,
+            .mesh = surface_stream_slots_[surface_mesh_slot_].mesh,
             .object_id = {.value = k_surface_object_base},
             .transform = {},
             .material = surface_material_,
@@ -2824,7 +3375,6 @@ class DfsphPlaybackApp
 
     MeshHandle particle_mesh_{};
     MeshHandle floor_mesh_{};
-    MeshHandle surface_mesh_{};
     Material surface_material_{
         .base_color = Color{0.08f, 0.44f, 0.82f, 1.0f},
         .metallic = 0.0f,
@@ -2836,6 +3386,7 @@ class DfsphPlaybackApp
     std::vector<RigidBodySlot> rigid_bodies_{};
     std::vector<Vec3> velocity_positions_{};
     std::vector<Vec3> velocity_vectors_{};
+    std::vector<SurfaceStreamSlot> surface_stream_slots_{};
     std::vector<u32> selected_particle_ids_{};
     std::vector<usize> selected_particle_indices_{};
     std::vector<usize> neighbor_particle_indices_{};
@@ -2853,7 +3404,8 @@ class DfsphPlaybackApp
     std::string surface_preload_error_{};
     usize scene_index_{};
     usize selection_synced_frame_{k_invalid_index};
-    usize cached_surface_frame_index_{k_invalid_index};
+    usize surface_mesh_slot_{k_invalid_index};
+    usize surface_stream_clock_{};
     usize surface_vertex_count_{};
     usize surface_triangle_count_{};
     usize surface_preload_total_{};
@@ -2861,6 +3413,7 @@ class DfsphPlaybackApp
     usize surface_preload_result_max_vertices_{};
     usize surface_preload_result_max_triangles_{};
     usize surface_preloaded_frames_{};
+    usize surface_preload_cpu_bytes_{};
     f32 surface_preload_ms_{};
     f32 global_max_speed_{};
     f32 global_max_density_{};
@@ -2883,6 +3436,7 @@ class DfsphPlaybackApp
     bool surface_cache_present_{false};
     bool surface_frame_available_{false};
     bool surface_preload_finished_{false};
+    bool surface_mesh_capacity_prewarmed_{false};
     bool show_rigid_bodies_{true};
     bool show_velocity_arrows_{false};
     bool velocity_arrows_on_top_{true};
@@ -2893,6 +3447,7 @@ class DfsphPlaybackApp
     bool selection_dirty_{true};
     bool frame_slider_scrubbing_{false};
     bool frame_slider_resume_after_release_{false};
+    bool skip_next_runtime_profile_sample_{false};
     bool profile_enabled_{};
     DfsphProfile profile_{};
     std::jthread surface_preload_thread_{};
@@ -2963,6 +3518,10 @@ auto main(int argc, char** argv) -> int
             else if (arg == "--playback-speed" and i + 1 < argc)
             {
                 app_cfg.playback_speed = parse_f32(argv[++i], app_cfg.playback_speed);
+            }
+            else if (arg == "--loop")
+            {
+                app_cfg.loop_playback = true;
             }
             else if (arg == "--profile")
             {

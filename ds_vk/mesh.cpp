@@ -212,7 +212,43 @@ auto aabb_of(const MeshData& mesh) -> Aabb
     return Aabb{.min = min_value, .max = max_value};
 }
 
+auto aabb_of(const PositionNormalMeshData& mesh) -> Aabb
+{
+    if (mesh.vertices.empty())
+    {
+        return {};
+    }
+
+    Vec3 min_value{std::numeric_limits<f32>::max()};
+    Vec3 max_value{std::numeric_limits<f32>::lowest()};
+    for (const auto& vertex : mesh.vertices)
+    {
+        min_value = glm::min(min_value, vertex.position);
+        max_value = glm::max(max_value, vertex.position);
+    }
+    return Aabb{.min = min_value, .max = max_value};
+}
+
+auto aabb_of(const QuantizedPositionNormalMeshData& mesh) -> Aabb
+{
+    if (mesh.vertices.empty())
+    {
+        return {};
+    }
+    return Aabb{.min = mesh.decode_origin, .max = mesh.decode_origin + mesh.decode_extent};
+}
+
 auto triangle_count(const MeshData& mesh) noexcept -> usize
+{
+    return mesh.indices.size() / 3zu;
+}
+
+auto triangle_count(const PositionNormalMeshData& mesh) noexcept -> usize
+{
+    return mesh.indices.size() / 3zu;
+}
+
+auto triangle_count(const QuantizedPositionNormalMeshData& mesh) noexcept -> usize
 {
     return mesh.indices.size() / 3zu;
 }
@@ -220,7 +256,24 @@ auto triangle_count(const MeshData& mesh) noexcept -> usize
 auto has_valid_indices(const MeshData& mesh) noexcept -> bool
 {
     return std::ranges::all_of(
-        mesh.indices, [&](u32 index) -> bool { return index < mesh.vertices.size(); }
+        mesh.indices,
+        [&](u32 index) -> bool { return static_cast<usize>(index) < mesh.vertices.size(); }
+    );
+}
+
+auto has_valid_indices(const PositionNormalMeshData& mesh) noexcept -> bool
+{
+    return std::ranges::all_of(
+        mesh.indices,
+        [&](u32 index) -> bool { return static_cast<usize>(index) < mesh.vertices.size(); }
+    );
+}
+
+auto has_valid_indices(const QuantizedPositionNormalMeshData& mesh) noexcept -> bool
+{
+    return std::ranges::all_of(
+        mesh.indices,
+        [&](u32 index) -> bool { return static_cast<usize>(index) < mesh.vertices.size(); }
     );
 }
 }  // namespace ds_vk

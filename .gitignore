@@ -70,3 +70,17 @@ Testing/
 run/
 .venv/
 imgui.ini
+
+# Large/generated simulation data. New DFSPH scenes are local cache data by
+# default; force-add only tiny metadata/docs intentionally.
+assets/dfsph/*/
+!assets/dfsph/README.md
+assets/dfsph/**/vtk/
+assets/dfsph/**/surface/frames/
+assets/dfsph/**/*.vtk
+assets/dfsph/**/*.mesh.gz
+assets/dfsph/**/*.bin
+assets/dfsph/**/*.bin.gz
+
+# Local Quake source data cache.
+app/quake/assets/

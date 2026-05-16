@@ -623,9 +623,9 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
   handle in the mesh vector throws.
 - Mesh upload/replacement now errors clearly if called before the runtime is
   initialized.
-- `replace_mesh` currently waits for the device to go idle before destroying old
-  mesh buffers. This is conservative but correct for slider-driven rebuilds; a
-  later renderer can replace it with deferred destruction keyed to frame fences.
+- The first implementation waited for the device to go idle before destroying old
+  mesh buffers. That was conservative but too coarse for later streamed-surface
+  playback; see the 2026-05-16 surface streaming note below.
 - The basic app now uses `replace_mesh` for generated sphere rebuilds.
 - `cmake --build build`, `ctest --test-dir build --output-on-failure`, and a
   targeted tidy pass over runtime/app pass after the change.
@@ -1037,12 +1037,12 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
 - Single-threaded CPU preload initially took 12882.841 ms for all 600 frames.
   The explicit 8-worker preload reduced that to 4223.951 ms on the same 50k
   scene. Runtime surface read/gzip/decode counters were 0.000 ms after preload.
-- The remaining cost is now the upload/replacement path. `replace_mesh`
-  conservatively uses `vkDeviceWaitIdle` before destroying the previous mesh
-  buffers, so fast mesh playback can still stall on synchronization and buffer
+- The remaining cost is now the upload/replacement path. Before the next change,
+  `replace_mesh` still used `vkDeviceWaitIdle` before destroying the previous
+  mesh buffers, so fast mesh playback could stall on synchronization and buffer
   upload. A bigger fix would use staged per-frame uploads plus deferred resource
   destruction tied to frame fences, or a more specialized streaming surface
-  buffer path. That is outside the current small change, but it is now the clear
+  buffer path. That is outside this CPU preload change, but it is now the clear
   next bottleneck instead of gzip/decode.
 - Verification:
   - `cmake --build build --target ds_vk_dfsph_app`
@@ -1053,3 +1053,181 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
   - `clang-tidy -p build app/dfsph_main.cpp`
   - `ctest --test-dir build --output-on-failure`
   - `git diff --check`
+
+### 2026-05-16 DFSPH Surface Streaming Follow-up
+
+- Rechecked the old DFSPH viewer performance notes and source. The old renderer
+  avoided device-wide waits in normal playback, cached per-swapchain surface
+  buffers, applied back-face culling where valid, and had a separate culling path
+  for particle spheres. The immediately applicable lesson for this framework was
+  not to treat a high-frequency mesh replacement like an editor slider rebuild.
+- The new stutter source was `Runtime::replace_mesh`: every DFSPH surface frame
+  created replacement vertex/index buffers and then called `vkDeviceWaitIdle`
+  before destroying the previous buffers. On the 50k scene this creates exactly
+  the intermittent playback hitch that remains after CPU preload removes gzip and
+  decode from the hot path.
+- `replace_mesh` now retires the old mesh buffers into a small queue and destroys
+  them only after enough swapchain frames have passed. The frame loop collects
+  retired meshes after waiting the current swapchain image fence and resetting
+  that command pool, which keeps old `VkBuffer` handles alive for command buffers
+  that may still reference them without stopping the whole device.
+- The first profile after that still showed upload spikes because the DFSPH app
+  was allocating replacement vertex/index buffers every surface frame. The app
+  now keeps one streamed surface `MeshHandle` per swapchain image and updates the
+  current image's handle in place once capacity permits. That is safe because the
+  runtime has already waited that swapchain image's fence before app update code
+  runs. Larger frames still fall back to `replace_mesh`, so capacity grows lazily.
+- The reusable framework piece is `Runtime::update_mesh`. It is intentionally a
+  sharp tool: it reuses existing buffers when there is enough capacity, but the
+  caller owns synchronization and should use per-frame/per-swapchain handles for
+  continuously streamed geometry.
+- Mesh resources are now created persistently mapped when possible. Streamed
+  updates therefore use direct `memcpy` plus `vmaFlushAllocation` instead of
+  repeatedly entering VMA's map/copy/unmap path. This does not remove the raw
+  bandwidth cost of uploading large surface meshes, but it removes avoidable
+  allocation and mapping overhead from the steady-state loop.
+- After CPU preload completes, the DFSPH app reserves each swapchain surface
+  mesh handle to the largest decoded vertex/index count in the history. That
+  pays the worst allocation/capacity growth cost once near the loading phase
+  instead of letting the first large frame encountered during playback hitch the
+  interactive path. This now uses explicit `Runtime::reserve_mesh_capacity`
+  rather than uploading a real frame solely to grow the buffers.
+- Final 50k looped smoke profile
+  (`--scene-id dambreak_50k_600f_dfsph_v2 --show-mesh --hide-particles
+  --hide-ui --smoke-frames 8000 --playback-speed 20 --loop --profile`) rendered
+  7406 surface frames after preload. `surface_read`, `surface_gzip`, and
+  `surface_decode` stayed at 0.000 ms. `surface_upload` averaged 5.549 ms with
+  a 62.859 ms max, and preload was 5071.832 ms. The remaining steady cost is raw
+  CPU writes of large surface vertex/index buffers, not file IO or Vulkan
+  device-idle synchronization.
+- The DFSPH surface path now uses a compact `PositionNormalMeshData` format
+  instead of the generic `MeshData` vertex. Surface playback needs position and
+  normal only; vertex color and UV are constant/unused. This cuts the streamed
+  vertex stride from the generic 48-byte `Vertex` to a 24-byte
+  `PositionNormalVertex`. The index buffer is unchanged, so the total upload is
+  not exactly halved, but the large per-frame write is substantially smaller.
+- Compact surface vertices use a separate Vulkan graphics pipeline with the same
+  mesh descriptor layout and fragment shader. The compact vertex shader emits a
+  constant white vertex color and zero UV, which is correct for the current
+  material-colored DFSPH surface path. Textured meshes should stay on the
+  generic `MeshData` path.
+- After compacting the 50k looped smoke profile
+  (`--scene-id dambreak_50k_600f_dfsph_v2 --show-mesh --hide-particles
+  --hide-ui --smoke-frames 8000 --playback-speed 20 --loop --profile`) rendered
+  7594 surface frames after preload. `surface_upload` averaged 3.403 ms with a
+  47.707 ms max. That is a clear improvement from the reserved generic-vertex
+  path's 5.549 ms mean / 62.859 ms max, and confirms the bottleneck had become
+  raw CPU-to-mapped-buffer write volume.
+- The DFSPH surface path now preserves cache quantization through preload and
+  upload when the cache version provides it: positions stay as `u16` values in
+  per-frame bounds, and cache normals are repacked to octahedral `u8x2` during
+  CPU preload. The runtime exposes this as `QuantizedPositionNormalMeshData`.
+  Its vertex stride is 12 bytes: four `u16` position channels, two `u8`
+  oct-normal channels, and two reserved bytes.
+- Decode is done by Vulkan normalized vertex fetch plus the existing model path.
+  The per-mesh decode transform is pre-composed into the instance/model matrix,
+  so local position decoding remains `bounds_min + extent * q / 65535` without
+  increasing push constant size. Positions use `R16G16B16A16_UNORM`; normals use
+  `R8G8_UNORM` and are octahedrally decoded and normalized in the vertex shader.
+  Position playback accuracy stays at the cache's quantization level; normal
+  precision is now oct8, which is visually unchanged in the current DFSPH smoke
+  comparison.
+- The first quantized shader version used integer vertex attributes and explicit
+  shader divides. That cut upload cost but moved too much work into the render
+  bucket. Switching to `UNORM`/`SNORM` vertex formats moved conversion back into
+  vertex fetch and made the whole frame faster.
+- Final quantized 50k looped smoke profile
+  (`--scene-id dambreak_50k_600f_dfsph_v2 --show-mesh --hide-particles
+  --hide-ui --smoke-frames 8000 --playback-speed 20 --loop --profile`) rendered
+  6215 surface frames after preload. `surface_upload` averaged 0.427 ms with a
+  10.795 ms max; frame mean was 1.927 ms. Preload was 3325.309 ms because CPU
+  preload no longer expands all vertices to f32.
+- Oct8 follow-up with playback stalling enabled rendered 5312 surface uploads in
+  the same smoke command. This run was display/frame-paced (`frame` mean 16.825
+  ms, `render` mean 15.421 ms), so it is not directly comparable to the earlier
+  uncapped-looking timing. It still validated the packed path: preload was
+  3270.184 ms and `surface_upload` averaged 1.097 ms with a 25.527 ms max.
+  Screenshot comparison against the previous quantized surface smoke was exact:
+  `mean_abs_rgb [0.0, 0.0, 0.0]`, `max_channel 0`.
+- The closest available source scene to the earlier "130k" dambreak discussion
+  is `dambreak_150k_300f_dfsph_v1` with 148,877 particles. It was migrated from
+  the DFSPH viewer showcase exports as 300 particle VTK frames plus 300
+  quantized surface frames. A mesh-only screenshot smoke passed:
+  `./run.sh --app dfsph --scene-id dambreak_150k_300f_dfsph_v1 --show-mesh
+  --hide-particles --hide-ui --smoke-frames 16 --screenshot
+  run/dfsph_150k_surface_smoke.png`.
+- The 150k looped mesh-only profile
+  (`--scene-id dambreak_150k_300f_dfsph_v1 --show-mesh --hide-particles
+  --hide-ui --smoke-frames 2400 --playback-speed 20 --loop --profile`) rendered
+  2040 surface uploads after preload. Maximum surface size was 2,067,538
+  vertices and 691,112 triangles. Preload took 6298.399 ms. `surface_upload`
+  averaged 6.238 ms with a 78.367 ms max; frame mean was 17.688 ms with a
+  167.857 ms max. This is workable enough for inspection, but not smooth enough
+  to call done. The next obvious improvement is an app-specific surface stream
+  ring/prefetcher so the visible frame usually draws an already-uploaded mesh.
+- The first 8-slot surface stream ring experiment filled too aggressively and
+  made burst stalls worse. The tuned policy keeps 8 reusable slots, targets
+  `current + 1` through `current + 4`, uploads at most two missing future frames
+  per sync step while warming the window, and stalls playback if the next
+  surface frame is not cached. The screenshot smoke stayed pixel-identical to
+  the previous surface path.
+- The tuned 150k stream profile
+  (`--scene-id dambreak_150k_300f_dfsph_v1 --show-mesh --hide-particles
+  --hide-ui --smoke-frames 2400 --playback-speed 20 --loop --profile`) rendered
+  2097 surface uploads. `frame` averaged 16.870 ms with a 99.498 ms max,
+  `render` averaged 11.029 ms with a 38.870 ms max, and `surface_upload`
+  averaged 6.402 ms with a 68.350 ms max. The ring reduced the worst frame and
+  render spikes, but it does not change the fundamental one-new-surface-frame
+  write volume during sequential playback.
+- Follow-up profiling separated startup warmup from steady playback. The app now
+  pre-fills the eight surface stream slots after CPU preload, reports
+  `surface_warmup` separately, and skips the runtime stat sample that contains
+  that warmup. In the measured 150k runs, warmup was not the source of the large
+  upload max: warmup stayed around 5-11 ms, while steady uploads still produced
+  larger spikes. A noisy short run saw the largest steady upload on frame 88
+  (1,871,332 vertices / 625,312 triangles), so the spike was not simply frame 0
+  initialization.
+- `Runtime::update_mesh` no longer validates every index by default. That scan is
+  useful for debugging generated meshes, but it is pure CPU work on streaming
+  frames that were already validated during preload. Callers can opt back in with
+  `MeshUpdateConfig{.validate_indices = true}`.
+- The 150k surface CPU cache is large enough to matter: reading only the gzip
+  payload headers gives about 5.054 GiB of resident decoded mesh data for 300
+  frames. Each max-sized uploaded frame is about 31.57 MiB. If the machine is
+  under memory pressure, those first-use copies can still show page/cache stalls
+  even though the renderer is not close to raw hardware bandwidth.
+- Rough transfer math for the 150k max surface: `2,067,538 * 12` vertex bytes
+  plus `691,112 * 3 * 4` index bytes is about 33.1 MB, or 31.6 MiB, for a full
+  max-sized surface update. Using the 6.402 ms mean upload as a rough upper-bound
+  byte rate gives about 5.2 GB/s effective CPU write throughput. This is far
+  below Apple M2's advertised 100 GB/s unified memory bandwidth
+  (https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/),
+  which strongly suggests the bottleneck is not a PCIe-style CPU-to-discrete-GPU
+  transfer. In this app the buffers are already VMA host-visible mapped buffers
+  (`VMA_MEMORY_USAGE_AUTO_PREFER_HOST` plus `HOST_ACCESS_SEQUENTIAL_WRITE`), so
+  on Apple Silicon/MoltenVK this should be shared-memory writing plus coherency
+  flush/cache behavior, not a copy into separate VRAM.
+- Mesh smoothing was intentionally removed from this pass. The CPU render-copy
+  smoothing experiment was the wrong shape for packed playback; proper smoothing
+  needs its own design, either as cache preprocessing or a GPU compute path.
+- No explicit `vkCmdPipelineBarrier2` is needed for this specific upload path:
+  the CPU writes happen before command-buffer recording/submission, and VMA's
+  copy helper maps, copies, unmaps, and flushes non-coherent memory as required.
+  The synchronization issue here is lifetime of old buffers, not shader/transfer
+  visibility between queued GPU operations.
+- Verification after the compact surface format:
+  - `cmake --build build`
+  - `ctest --test-dir build --output-on-failure`
+  - `clang-format --dry-run --Werror app/dfsph_main.cpp ds_vk/mesh.hpp ds_vk/mesh.cpp ds_vk/runtime.hpp ds_vk/runtime.cpp ds_vk/shaders/mesh_position_normal.vert ds_vk/shaders/mesh_quantized_position_normal.vert ds_vk/shaders/shadow_quantized_position.vert`
+  - `clang-tidy -p build ds_vk/mesh.cpp`
+  - `clang-tidy -p build ds_vk/runtime.cpp`
+  - `clang-tidy -p build app/dfsph_main.cpp`
+  - `clang-tidy -p build tests/test_main.cpp`
+  - `git diff --check`
+  - `./run.sh --app dfsph --scene-id dambreak_50k_600f_dfsph_v2 --show-mesh --hide-particles --hide-ui --smoke-frames 8000 --playback-speed 20 --loop --profile`
+  - `./run.sh --app dfsph --scene-id dambreak_small_iisph_v1 --show-mesh --hide-particles --hide-ui --smoke-frames 16 --screenshot run/dfsph_compact_surface_smoke.png`
+  - `./.venv/bin/python scripts/validate_screenshot.py run/dfsph_compact_surface_smoke.png`
+  - `./run.sh --app dfsph --scene-id dambreak_small_iisph_v1 --show-mesh --hide-particles --hide-ui --smoke-frames 16 --screenshot run/dfsph_quantized_surface_smoke.png`
+  - `./.venv/bin/python scripts/validate_screenshot.py run/dfsph_quantized_surface_smoke.png`
+  - pixel comparison between compact decoded and quantized screenshot:
+    `mean_abs_rgb [0.0, 0.0, 0.0]`, `max_channel 0`.

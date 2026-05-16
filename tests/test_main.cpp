@@ -241,6 +241,30 @@ auto test_cube_mesh() -> void
     }
 }
 
+auto test_quantized_position_normal_mesh() -> void
+{
+    ds_vk::QuantizedPositionNormalMeshData mesh{
+        .decode_origin = {1.0f, 2.0f, 3.0f},
+        .decode_extent = {4.0f, 5.0f, 6.0f},
+        .vertices =
+            {
+                {.position = {0u, 0u, 0u, 0u}, .normal_oct = {128u, 128u}, .reserved = {}},
+                {.position = {65535u, 0u, 0u, 0u}, .normal_oct = {128u, 128u}, .reserved = {}},
+                {.position = {0u, 65535u, 0u, 0u}, .normal_oct = {128u, 128u}, .reserved = {}},
+            },
+        .indices = {0u, 1u, 2u},
+    };
+    check(ds_vk::has_valid_indices(mesh), "quantized mesh indices are valid");
+    check(ds_vk::triangle_count(mesh) == 1zu, "quantized mesh triangle count");
+    const auto aabb = ds_vk::aabb_of(mesh);
+    check(near(aabb.min.x, 1.0f) and near(aabb.max.x, 5.0f), "quantized mesh x bounds");
+    check(near(aabb.min.y, 2.0f) and near(aabb.max.y, 7.0f), "quantized mesh y bounds");
+    check(near(aabb.min.z, 3.0f) and near(aabb.max.z, 9.0f), "quantized mesh z bounds");
+
+    mesh.indices.push_back(7u);
+    check(!ds_vk::has_valid_indices(mesh), "quantized mesh rejects invalid index");
+}
+
 auto test_sphere_mesh() -> void
 {
     constexpr auto slices = 12u;
@@ -810,6 +834,7 @@ auto main() -> int
         test_color_types();
         test_quad_mesh();
         test_cube_mesh();
+        test_quantized_position_normal_mesh();
         test_sphere_mesh();
         test_gltf_assets();
         test_camera_projection();

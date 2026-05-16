@@ -168,8 +168,11 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     ds_vk/shaders/environment.vert
     ds_vk/shaders/environment.frag
     ds_vk/shaders/mesh.vert
+    ds_vk/shaders/mesh_position_normal.vert
+    ds_vk/shaders/mesh_quantized_position_normal.vert
     ds_vk/shaders/mesh.frag
     ds_vk/shaders/shadow.vert
+    ds_vk/shaders/shadow_quantized_position.vert
     ds_vk/shaders/debug_line.vert
     ds_vk/shaders/debug_line.frag
   )
@@ -275,6 +278,18 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     ds_vk_warnings
   )
   ds_vk_enable_pch(ds_vk_pba_app)
+
+  add_executable(ds_vk_quake_app app/quake_main.cpp)
+  target_compile_definitions(ds_vk_quake_app PRIVATE
+    DS_VK_QUAKE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app/quake/assets"
+  )
+  target_link_libraries(ds_vk_quake_app PRIVATE
+    ds_vk
+    ds_vk_viz
+    ds_vk_picker
+    ds_vk_warnings
+  )
+  ds_vk_enable_pch(ds_vk_quake_app)
 
   if(DS_VK_BUILD_TESTS)
     add_executable(ds_vk_runtime_tests tests/test_runtime.cpp)

@@ -10,9 +10,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -51,8 +53,18 @@ struct MeshResource
 {
     Buffer vertices{};
     Buffer indices{};
+    Mat4 position_model{1.0f};
     u32 vertex_count{};
     u32 index_count{};
+    usize vertex_capacity{};
+    usize index_capacity{};
+    MeshVertexFormat vertex_format{MeshVertexFormat::standard};
+};
+
+struct RetiredMeshResource
+{
+    MeshResource resource{};
+    u64 destroy_after_frame{};
 };
 
 struct TextureResource
@@ -206,12 +218,18 @@ constexpr auto k_required_push_constant_bytes = std::max(
     return static_cast<u32>(value);
 }
 
-[[nodiscard]] auto to_gpu_mesh_instance(const Transform& transform, u32 material_index) noexcept
-    -> GpuMeshInstance
+[[nodiscard]] auto position_decode_model(const Vec3 origin, const Vec3 extent) noexcept -> Mat4
+{
+    return glm::translate(Mat4{1.0f}, origin) * glm::scale(Mat4{1.0f}, extent);
+}
+
+[[nodiscard]] auto to_gpu_mesh_instance(
+    const Transform& transform, const u32 material_index, const Mat4& position_model
+) noexcept -> GpuMeshInstance
 {
     const auto model = transform.matrix();
     return GpuMeshInstance{
-        .model = model,
+        .model = model * position_model,
         .normal_model = glm::transpose(glm::inverse(model)),
         .material_index = material_index,
     };
@@ -477,6 +495,28 @@ template <typename T>
 auto data_byte_size(std::span<const T> values) noexcept -> VkDeviceSize
 {
     return static_cast<VkDeviceSize>(values.size()) * static_cast<VkDeviceSize>(sizeof(T));
+}
+
+template <typename T>
+auto data_byte_capacity(usize count) noexcept -> VkDeviceSize
+{
+    return static_cast<VkDeviceSize>(count) * static_cast<VkDeviceSize>(sizeof(T));
+}
+
+[[nodiscard]] auto
+mesh_vertex_byte_capacity(const MeshVertexFormat vertex_format, const usize vertex_count)
+    -> VkDeviceSize
+{
+    switch (vertex_format)
+    {
+        case MeshVertexFormat::standard:
+            return data_byte_capacity<Vertex>(vertex_count);
+        case MeshVertexFormat::position_normal:
+            return data_byte_capacity<PositionNormalVertex>(vertex_count);
+        case MeshVertexFormat::quantized_position_normal:
+            return data_byte_capacity<QuantizedPositionNormalVertex>(vertex_count);
+    }
+    throw std::runtime_error("unknown mesh vertex format");
 }
 
 template <typename T>
@@ -809,6 +849,7 @@ struct Runtime::Impl
     VkPipelineCache pipeline_cache{VK_NULL_HANDLE};
     ImGui_ImplVulkanH_Window window_data{};
     u32 min_image_count{2u};
+    u64 frame_counter{};
     u32 vulkan_api_version{VK_API_VERSION_1_2};
     bool swapchain_rebuild{};
     VkFormat depth_format{VK_FORMAT_UNDEFINED};
@@ -819,13 +860,18 @@ struct Runtime::Impl
     VkPipelineLayout mesh_pipeline_layout{VK_NULL_HANDLE};
     VkPipeline environment_pipeline{VK_NULL_HANDLE};
     VkPipeline mesh_pipeline{VK_NULL_HANDLE};
+    VkPipeline mesh_position_normal_pipeline{VK_NULL_HANDLE};
+    VkPipeline mesh_quantized_position_normal_pipeline{VK_NULL_HANDLE};
     VkPipelineLayout shadow_pipeline_layout{VK_NULL_HANDLE};
     VkPipeline shadow_pipeline{VK_NULL_HANDLE};
+    VkPipeline shadow_position_normal_pipeline{VK_NULL_HANDLE};
+    VkPipeline shadow_quantized_position_pipeline{VK_NULL_HANDLE};
     VkPipelineLayout debug_pipeline_layout{VK_NULL_HANDLE};
     VkPipeline debug_pipeline{VK_NULL_HANDLE};
     VkPipeline debug_on_top_pipeline{VK_NULL_HANDLE};
     ShadowMap shadow_map{};
     std::vector<MeshResource> meshes;
+    std::deque<RetiredMeshResource> retired_meshes;
     std::vector<TextureResource> textures;
     std::vector<Buffer> debug_segment_buffers;
     std::vector<Buffer> debug_on_top_segment_buffers;
@@ -883,14 +929,36 @@ struct Runtime::Impl
     auto ensure_mesh_instance_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_mesh_lighting_buffer(usize frame_index) -> Buffer&;
     auto flush_buffer(const Buffer& buffer, VkDeviceSize size) -> void;
+    auto write_buffer(Buffer& buffer, const void* data, VkDeviceSize size) -> void;
     auto update_mesh_material_descriptor(usize frame_index, const Buffer& buffer) -> void;
     auto update_mesh_instance_descriptor(usize frame_index, const Buffer& buffer) -> void;
     auto update_mesh_lighting_descriptor(usize frame_index, const Buffer& buffer) -> void;
     auto update_mesh_texture_descriptors() -> void;
     auto update_mesh_shadow_descriptors() -> void;
+    auto create_mesh_resource(
+        usize vertex_capacity, usize index_capacity, MeshVertexFormat vertex_format
+    ) -> MeshResource;
     auto create_mesh_resource(const MeshData& mesh) -> MeshResource;
+    auto create_mesh_resource(const PositionNormalMeshData& mesh) -> MeshResource;
+    auto create_mesh_resource(const QuantizedPositionNormalMeshData& mesh) -> MeshResource;
+    auto destroy_mesh_resource(MeshResource& mesh) noexcept -> void;
+    auto retire_mesh_resource(MeshResource mesh) -> void;
+    auto collect_retired_meshes() noexcept -> void;
     auto upload_mesh(const MeshData& mesh) -> MeshHandle;
+    auto upload_mesh(const PositionNormalMeshData& mesh) -> MeshHandle;
+    auto upload_mesh(const QuantizedPositionNormalMeshData& mesh) -> MeshHandle;
+    auto reserve_mesh_capacity(const MeshReserveConfig& cfg) -> MeshHandle;
+    auto update_mesh(MeshHandle handle, const MeshData& mesh, const MeshUpdateConfig& cfg)
+        -> MeshHandle;
+    auto
+    update_mesh(MeshHandle handle, const PositionNormalMeshData& mesh, const MeshUpdateConfig& cfg)
+        -> MeshHandle;
+    auto update_mesh(
+        MeshHandle handle, const QuantizedPositionNormalMeshData& mesh, const MeshUpdateConfig& cfg
+    ) -> MeshHandle;
     auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
+    auto replace_mesh(MeshHandle handle, const PositionNormalMeshData& mesh) -> MeshHandle;
+    auto replace_mesh(MeshHandle handle, const QuantizedPositionNormalMeshData& mesh) -> MeshHandle;
     auto render_frame(
         VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index, ImDrawData* draw_data
     ) -> void;
@@ -1420,6 +1488,27 @@ auto Runtime::Impl::flush_buffer(const Buffer& buffer, VkDeviceSize size) -> voi
     check_vk_result(vmaFlushAllocation(vma_allocator, buffer.allocation, 0, size));
 }
 
+auto Runtime::Impl::write_buffer(Buffer& buffer, const void* data, VkDeviceSize size) -> void
+{
+    if (size == VkDeviceSize{0})
+    {
+        return;
+    }
+    if (size > buffer.capacity)
+    {
+        throw std::runtime_error("buffer write exceeds allocation capacity");
+    }
+
+    if (buffer.mapped != nullptr)
+    {
+        std::memcpy(buffer.mapped, data, static_cast<usize>(size));
+        flush_buffer(buffer, size);
+        return;
+    }
+
+    check_vk_result(vmaCopyMemoryToAllocation(vma_allocator, data, buffer.allocation, 0, size));
+}
+
 auto Runtime::Impl::update_mesh_material_descriptor(usize frame_index, const Buffer& buffer) -> void
 {
     if (mesh_descriptor_sets.empty())
@@ -1553,32 +1642,35 @@ auto Runtime::Impl::update_mesh_shadow_descriptors() -> void
     }
 }
 
-auto Runtime::Impl::create_mesh_resource(const MeshData& mesh) -> MeshResource
+auto Runtime::Impl::create_mesh_resource(
+    const usize vertex_capacity, const usize index_capacity, const MeshVertexFormat vertex_format
+) -> MeshResource
 {
     if (vma_allocator == VK_NULL_HANDLE)
     {
-        throw std::runtime_error("mesh upload requires an initialized ds_vk::Runtime");
+        throw std::runtime_error("mesh allocation requires an initialized ds_vk::Runtime");
     }
-    if (mesh.vertices.empty() or mesh.indices.empty() or !has_valid_indices(mesh))
+    if (vertex_capacity == 0zu or index_capacity == 0zu)
     {
-        throw std::runtime_error("cannot upload empty mesh or mesh with invalid indices");
+        throw std::runtime_error("cannot reserve empty mesh capacity");
     }
+    (void) checked_u32(vertex_capacity, "mesh vertex capacity");
+    (void) checked_u32(index_capacity, "mesh index capacity");
 
-    const auto vertex_bytes = data_byte_size(mesh.vertices);
-    const auto index_bytes = data_byte_size(mesh.indices);
+    const auto vertex_bytes = mesh_vertex_byte_capacity(vertex_format, vertex_capacity);
+    const auto index_bytes = data_byte_capacity<u32>(index_capacity);
     MeshResource resource{};
     try
     {
-        resource.vertex_count = static_cast<u32>(mesh.vertices.size());
-        resource.index_count = static_cast<u32>(mesh.indices.size());
-        resource.vertices = create_buffer(vertex_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, false);
-        resource.indices = create_buffer(index_bytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, false);
-        check_vk_result(vmaCopyMemoryToAllocation(
-            vma_allocator, mesh.vertices.data(), resource.vertices.allocation, 0, vertex_bytes
-        ));
-        check_vk_result(vmaCopyMemoryToAllocation(
-            vma_allocator, mesh.indices.data(), resource.indices.allocation, 0, index_bytes
-        ));
+        resource.vertex_capacity = vertex_capacity;
+        resource.index_capacity = index_capacity;
+        resource.vertex_format = vertex_format;
+        resource.vertices = create_buffer(
+            vertex_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, VMA_MEMORY_USAGE_AUTO_PREFER_HOST
+        );
+        resource.indices = create_buffer(
+            index_bytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, true, VMA_MEMORY_USAGE_AUTO_PREFER_HOST
+        );
     }
     catch (...)
     {
@@ -1589,10 +1681,129 @@ auto Runtime::Impl::create_mesh_resource(const MeshData& mesh) -> MeshResource
     return resource;
 }
 
+auto Runtime::Impl::create_mesh_resource(const MeshData& mesh) -> MeshResource
+{
+    if (mesh.vertices.empty() or mesh.indices.empty() or !has_valid_indices(mesh))
+    {
+        throw std::runtime_error("cannot upload empty mesh or mesh with invalid indices");
+    }
+
+    auto resource =
+        create_mesh_resource(mesh.vertices.size(), mesh.indices.size(), MeshVertexFormat::standard);
+    try
+    {
+        write_buffer(resource.vertices, mesh.vertices.data(), data_byte_size(mesh.vertices));
+        write_buffer(resource.indices, mesh.indices.data(), data_byte_size(mesh.indices));
+        resource.vertex_count = checked_u32(mesh.vertices.size(), "mesh vertex count");
+        resource.index_count = checked_u32(mesh.indices.size(), "mesh index count");
+    }
+    catch (...)
+    {
+        destroy_mesh_resource(resource);
+        throw;
+    }
+    return resource;
+}
+
+auto Runtime::Impl::create_mesh_resource(const PositionNormalMeshData& mesh) -> MeshResource
+{
+    if (mesh.vertices.empty() or mesh.indices.empty() or !has_valid_indices(mesh))
+    {
+        throw std::runtime_error(
+            "cannot upload empty position-normal mesh or mesh with invalid indices"
+        );
+    }
+
+    auto resource = create_mesh_resource(
+        mesh.vertices.size(), mesh.indices.size(), MeshVertexFormat::position_normal
+    );
+    try
+    {
+        write_buffer(resource.vertices, mesh.vertices.data(), data_byte_size(mesh.vertices));
+        write_buffer(resource.indices, mesh.indices.data(), data_byte_size(mesh.indices));
+        resource.vertex_count =
+            checked_u32(mesh.vertices.size(), "position-normal mesh vertex count");
+        resource.index_count = checked_u32(mesh.indices.size(), "position-normal mesh index count");
+    }
+    catch (...)
+    {
+        destroy_mesh_resource(resource);
+        throw;
+    }
+    return resource;
+}
+
+auto Runtime::Impl::create_mesh_resource(const QuantizedPositionNormalMeshData& mesh)
+    -> MeshResource
+{
+    if (mesh.vertices.empty() or mesh.indices.empty() or !has_valid_indices(mesh))
+    {
+        throw std::runtime_error(
+            "cannot upload empty quantized position-normal mesh or mesh with invalid indices"
+        );
+    }
+
+    auto resource = create_mesh_resource(
+        mesh.vertices.size(), mesh.indices.size(), MeshVertexFormat::quantized_position_normal
+    );
+    try
+    {
+        resource.position_model = position_decode_model(mesh.decode_origin, mesh.decode_extent);
+        write_buffer(resource.vertices, mesh.vertices.data(), data_byte_size(mesh.vertices));
+        write_buffer(resource.indices, mesh.indices.data(), data_byte_size(mesh.indices));
+        resource.vertex_count =
+            checked_u32(mesh.vertices.size(), "quantized position-normal mesh vertex count");
+        resource.index_count =
+            checked_u32(mesh.indices.size(), "quantized position-normal mesh index count");
+    }
+    catch (...)
+    {
+        destroy_mesh_resource(resource);
+        throw;
+    }
+    return resource;
+}
+
+auto Runtime::Impl::destroy_mesh_resource(MeshResource& mesh) noexcept -> void
+{
+    destroy_buffer(mesh.vertices);
+    destroy_buffer(mesh.indices);
+    mesh.position_model = Mat4{1.0f};
+    mesh.vertex_count = 0u;
+    mesh.index_count = 0u;
+    mesh.vertex_capacity = 0zu;
+    mesh.index_capacity = 0zu;
+}
+
+auto Runtime::Impl::retire_mesh_resource(MeshResource mesh) -> void
+{
+    if (mesh.vertices.handle == VK_NULL_HANDLE and mesh.indices.handle == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    const auto frames_in_flight =
+        static_cast<u64>(std::max(1u, static_cast<u32>(window_data.ImageCount)));
+    retired_meshes.push_back({
+        .resource = mesh,
+        .destroy_after_frame = frame_counter + frames_in_flight + 1u,
+    });
+}
+
+auto Runtime::Impl::collect_retired_meshes() noexcept -> void
+{
+    while (!retired_meshes.empty() and retired_meshes.front().destroy_after_frame <= frame_counter)
+    {
+        auto retired = retired_meshes.front();
+        retired_meshes.pop_front();
+        destroy_mesh_resource(retired.resource);
+    }
+}
+
 auto Runtime::Impl::upload_mesh(const MeshData& mesh) -> MeshHandle
 {
     auto resource = create_mesh_resource(mesh);
-    const auto index = static_cast<u32>(meshes.size());
+    const auto index = checked_u32(meshes.size(), "mesh handle id");
     try
     {
         meshes.push_back(resource);
@@ -1606,6 +1817,171 @@ auto Runtime::Impl::upload_mesh(const MeshData& mesh) -> MeshHandle
     return MeshHandle{.id = index};
 }
 
+auto Runtime::Impl::upload_mesh(const PositionNormalMeshData& mesh) -> MeshHandle
+{
+    auto resource = create_mesh_resource(mesh);
+    const auto index = checked_u32(meshes.size(), "mesh handle id");
+    try
+    {
+        meshes.push_back(resource);
+    }
+    catch (...)
+    {
+        destroy_mesh_resource(resource);
+        throw;
+    }
+    return MeshHandle{.id = index};
+}
+
+auto Runtime::Impl::upload_mesh(const QuantizedPositionNormalMeshData& mesh) -> MeshHandle
+{
+    auto resource = create_mesh_resource(mesh);
+    const auto index = checked_u32(meshes.size(), "mesh handle id");
+    try
+    {
+        meshes.push_back(resource);
+    }
+    catch (...)
+    {
+        destroy_mesh_resource(resource);
+        throw;
+    }
+    return MeshHandle{.id = index};
+}
+
+auto Runtime::Impl::reserve_mesh_capacity(const MeshReserveConfig& cfg) -> MeshHandle
+{
+    const auto mesh_index = static_cast<usize>(cfg.mesh.id);
+    if (cfg.mesh.valid() and mesh_index < meshes.size())
+    {
+        auto& resource = meshes[mesh_index];
+        if (resource.vertex_format == cfg.vertex_format
+            and resource.vertex_capacity >= cfg.vertex_capacity
+            and resource.index_capacity >= cfg.index_capacity)
+        {
+            return cfg.mesh;
+        }
+
+        auto replacement =
+            create_mesh_resource(cfg.vertex_capacity, cfg.index_capacity, cfg.vertex_format);
+        auto old = resource;
+        resource = replacement;
+        retire_mesh_resource(old);
+        return cfg.mesh;
+    }
+
+    auto resource =
+        create_mesh_resource(cfg.vertex_capacity, cfg.index_capacity, cfg.vertex_format);
+    const auto index = checked_u32(meshes.size(), "mesh handle id");
+    try
+    {
+        meshes.push_back(resource);
+    }
+    catch (...)
+    {
+        destroy_mesh_resource(resource);
+        throw;
+    }
+    return MeshHandle{.id = index};
+}
+
+auto Runtime::Impl::update_mesh(
+    MeshHandle handle, const MeshData& mesh, const MeshUpdateConfig& cfg
+) -> MeshHandle
+{
+    const auto mesh_index = static_cast<usize>(handle.id);
+    if (!handle.valid() or mesh_index >= meshes.size())
+    {
+        return upload_mesh(mesh);
+    }
+    if (mesh.vertices.empty() or mesh.indices.empty()
+        or (cfg.validate_indices and !has_valid_indices(mesh)))
+    {
+        throw std::runtime_error("cannot update mesh with empty data or invalid indices");
+    }
+
+    auto& resource = meshes[mesh_index];
+    if (resource.vertex_format != MeshVertexFormat::standard
+        or mesh.vertices.size() > resource.vertex_capacity
+        or mesh.indices.size() > resource.index_capacity)
+    {
+        return replace_mesh(handle, mesh);
+    }
+
+    write_buffer(resource.vertices, mesh.vertices.data(), data_byte_size(mesh.vertices));
+    write_buffer(resource.indices, mesh.indices.data(), data_byte_size(mesh.indices));
+    resource.vertex_count = checked_u32(mesh.vertices.size(), "mesh vertex count");
+    resource.index_count = checked_u32(mesh.indices.size(), "mesh index count");
+    return handle;
+}
+
+auto Runtime::Impl::update_mesh(
+    MeshHandle handle, const PositionNormalMeshData& mesh, const MeshUpdateConfig& cfg
+) -> MeshHandle
+{
+    const auto mesh_index = static_cast<usize>(handle.id);
+    if (!handle.valid() or mesh_index >= meshes.size())
+    {
+        return upload_mesh(mesh);
+    }
+    if (mesh.vertices.empty() or mesh.indices.empty()
+        or (cfg.validate_indices and !has_valid_indices(mesh)))
+    {
+        throw std::runtime_error(
+            "cannot update position-normal mesh with empty data or invalid indices"
+        );
+    }
+
+    auto& resource = meshes[mesh_index];
+    if (resource.vertex_format != MeshVertexFormat::position_normal
+        or mesh.vertices.size() > resource.vertex_capacity
+        or mesh.indices.size() > resource.index_capacity)
+    {
+        return replace_mesh(handle, mesh);
+    }
+
+    write_buffer(resource.vertices, mesh.vertices.data(), data_byte_size(mesh.vertices));
+    write_buffer(resource.indices, mesh.indices.data(), data_byte_size(mesh.indices));
+    resource.vertex_count = checked_u32(mesh.vertices.size(), "position-normal mesh vertex count");
+    resource.index_count = checked_u32(mesh.indices.size(), "position-normal mesh index count");
+    return handle;
+}
+
+auto Runtime::Impl::update_mesh(
+    MeshHandle handle, const QuantizedPositionNormalMeshData& mesh, const MeshUpdateConfig& cfg
+) -> MeshHandle
+{
+    const auto mesh_index = static_cast<usize>(handle.id);
+    if (!handle.valid() or mesh_index >= meshes.size())
+    {
+        return upload_mesh(mesh);
+    }
+    if (mesh.vertices.empty() or mesh.indices.empty()
+        or (cfg.validate_indices and !has_valid_indices(mesh)))
+    {
+        throw std::runtime_error(
+            "cannot update quantized position-normal mesh with empty data or invalid indices"
+        );
+    }
+
+    auto& resource = meshes[mesh_index];
+    if (resource.vertex_format != MeshVertexFormat::quantized_position_normal
+        or mesh.vertices.size() > resource.vertex_capacity
+        or mesh.indices.size() > resource.index_capacity)
+    {
+        return replace_mesh(handle, mesh);
+    }
+
+    resource.position_model = position_decode_model(mesh.decode_origin, mesh.decode_extent);
+    write_buffer(resource.vertices, mesh.vertices.data(), data_byte_size(mesh.vertices));
+    write_buffer(resource.indices, mesh.indices.data(), data_byte_size(mesh.indices));
+    resource.vertex_count =
+        checked_u32(mesh.vertices.size(), "quantized position-normal mesh vertex count");
+    resource.index_count =
+        checked_u32(mesh.indices.size(), "quantized position-normal mesh index count");
+    return handle;
+}
+
 auto Runtime::Impl::replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle
 {
     const auto mesh_index = static_cast<usize>(handle.id);
@@ -1615,20 +1991,46 @@ auto Runtime::Impl::replace_mesh(MeshHandle handle, const MeshData& mesh) -> Mes
     }
 
     auto replacement = create_mesh_resource(mesh);
-    try
-    {
-        check_vk_result(vkDeviceWaitIdle(device));
-    }
-    catch (...)
-    {
-        destroy_buffer(replacement.vertices);
-        destroy_buffer(replacement.indices);
-        throw;
-    }
     auto old = meshes[mesh_index];
     meshes[mesh_index] = replacement;
-    destroy_buffer(old.vertices);
-    destroy_buffer(old.indices);
+
+    // Existing command buffers can still reference the previous VkBuffers. Retiring them after
+    // the swapchain fences advance avoids a device-wide idle on high-frequency streamed meshes.
+    retire_mesh_resource(old);
+    return handle;
+}
+
+auto Runtime::Impl::replace_mesh(MeshHandle handle, const PositionNormalMeshData& mesh)
+    -> MeshHandle
+{
+    const auto mesh_index = static_cast<usize>(handle.id);
+    if (!handle.valid() or mesh_index >= meshes.size())
+    {
+        return upload_mesh(mesh);
+    }
+
+    auto replacement = create_mesh_resource(mesh);
+    auto old = meshes[mesh_index];
+    meshes[mesh_index] = replacement;
+
+    retire_mesh_resource(old);
+    return handle;
+}
+
+auto Runtime::Impl::replace_mesh(MeshHandle handle, const QuantizedPositionNormalMeshData& mesh)
+    -> MeshHandle
+{
+    const auto mesh_index = static_cast<usize>(handle.id);
+    if (!handle.valid() or mesh_index >= meshes.size())
+    {
+        return upload_mesh(mesh);
+    }
+
+    auto replacement = create_mesh_resource(mesh);
+    auto old = meshes[mesh_index];
+    meshes[mesh_index] = replacement;
+
+    retire_mesh_resource(old);
     return handle;
 }
 
@@ -2269,20 +2671,29 @@ auto Runtime::Impl::create_pipelines() -> void
         config.shader_dir.empty() ? std::filesystem::path{DS_VK_SHADER_DIR} : config.shader_dir;
 
     const auto mesh_vert = create_shader_module(device, shader_dir / "mesh.vert.spv");
+    const auto mesh_position_normal_vert =
+        create_shader_module(device, shader_dir / "mesh_position_normal.vert.spv");
+    const auto mesh_quantized_position_normal_vert =
+        create_shader_module(device, shader_dir / "mesh_quantized_position_normal.vert.spv");
     const auto mesh_frag = create_shader_module(device, shader_dir / "mesh.frag.spv");
     const auto environment_vert = create_shader_module(device, shader_dir / "environment.vert.spv");
     const auto environment_frag = create_shader_module(device, shader_dir / "environment.frag.spv");
     const auto shadow_vert = create_shader_module(device, shader_dir / "shadow.vert.spv");
+    const auto shadow_quantized_position_vert =
+        create_shader_module(device, shader_dir / "shadow_quantized_position.vert.spv");
     const auto debug_vert = create_shader_module(device, shader_dir / "debug_line.vert.spv");
     const auto debug_frag = create_shader_module(device, shader_dir / "debug_line.frag.spv");
 
     const auto destroy_shader_modules = [&]() -> void
     {
         vkDestroyShaderModule(device, mesh_vert, allocation_callbacks);
+        vkDestroyShaderModule(device, mesh_position_normal_vert, allocation_callbacks);
+        vkDestroyShaderModule(device, mesh_quantized_position_normal_vert, allocation_callbacks);
         vkDestroyShaderModule(device, mesh_frag, allocation_callbacks);
         vkDestroyShaderModule(device, environment_vert, allocation_callbacks);
         vkDestroyShaderModule(device, environment_frag, allocation_callbacks);
         vkDestroyShaderModule(device, shadow_vert, allocation_callbacks);
+        vkDestroyShaderModule(device, shadow_quantized_position_vert, allocation_callbacks);
         vkDestroyShaderModule(device, debug_vert, allocation_callbacks);
         vkDestroyShaderModule(device, debug_frag, allocation_callbacks);
     };
@@ -2510,6 +2921,63 @@ auto Runtime::Impl::create_pipelines() -> void
     mesh_vertex_input.vertexAttributeDescriptionCount = static_cast<u32>(mesh_attributes.size());
     mesh_vertex_input.pVertexAttributeDescriptions = mesh_attributes.data();
 
+    const VkVertexInputBindingDescription position_normal_binding{
+        .binding = 0,
+        .stride = sizeof(PositionNormalVertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    const std::array position_normal_attributes{
+        VkVertexInputAttributeDescription{
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(PositionNormalVertex, position),
+        },
+        VkVertexInputAttributeDescription{
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(PositionNormalVertex, normal),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo position_normal_vertex_input{};
+    position_normal_vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    position_normal_vertex_input.vertexBindingDescriptionCount = 1;
+    position_normal_vertex_input.pVertexBindingDescriptions = &position_normal_binding;
+    position_normal_vertex_input.vertexAttributeDescriptionCount =
+        static_cast<u32>(position_normal_attributes.size());
+    position_normal_vertex_input.pVertexAttributeDescriptions = position_normal_attributes.data();
+
+    const VkVertexInputBindingDescription quantized_position_normal_binding{
+        .binding = 0,
+        .stride = sizeof(QuantizedPositionNormalVertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    const std::array quantized_position_normal_attributes{
+        VkVertexInputAttributeDescription{
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R16G16B16A16_UNORM,
+            .offset = offsetof(QuantizedPositionNormalVertex, position),
+        },
+        VkVertexInputAttributeDescription{
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R8G8_UNORM,
+            .offset = offsetof(QuantizedPositionNormalVertex, normal_oct),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo quantized_position_normal_vertex_input{};
+    quantized_position_normal_vertex_input.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    quantized_position_normal_vertex_input.vertexBindingDescriptionCount = 1;
+    quantized_position_normal_vertex_input.pVertexBindingDescriptions =
+        &quantized_position_normal_binding;
+    quantized_position_normal_vertex_input.vertexAttributeDescriptionCount =
+        static_cast<u32>(quantized_position_normal_attributes.size());
+    quantized_position_normal_vertex_input.pVertexAttributeDescriptions =
+        quantized_position_normal_attributes.data();
+
     const std::array mesh_stages{
         make_stage(mesh_vert, VK_SHADER_STAGE_VERTEX_BIT),
         make_stage(mesh_frag, VK_SHADER_STAGE_FRAGMENT_BIT),
@@ -2531,6 +2999,44 @@ auto Runtime::Impl::create_pipelines() -> void
     mesh_pipeline_info.subpass = 0;
     check_vk_result(vkCreateGraphicsPipelines(
         device, pipeline_cache, 1, &mesh_pipeline_info, allocation_callbacks, &mesh_pipeline
+    ));
+
+    const std::array mesh_position_normal_stages{
+        make_stage(mesh_position_normal_vert, VK_SHADER_STAGE_VERTEX_BIT),
+        make_stage(mesh_frag, VK_SHADER_STAGE_FRAGMENT_BIT),
+    };
+    VkGraphicsPipelineCreateInfo mesh_position_normal_pipeline_info = mesh_pipeline_info;
+    mesh_position_normal_pipeline_info.stageCount =
+        static_cast<u32>(mesh_position_normal_stages.size());
+    mesh_position_normal_pipeline_info.pStages = mesh_position_normal_stages.data();
+    mesh_position_normal_pipeline_info.pVertexInputState = &position_normal_vertex_input;
+    check_vk_result(vkCreateGraphicsPipelines(
+        device,
+        pipeline_cache,
+        1,
+        &mesh_position_normal_pipeline_info,
+        allocation_callbacks,
+        &mesh_position_normal_pipeline
+    ));
+
+    const std::array mesh_quantized_position_normal_stages{
+        make_stage(mesh_quantized_position_normal_vert, VK_SHADER_STAGE_VERTEX_BIT),
+        make_stage(mesh_frag, VK_SHADER_STAGE_FRAGMENT_BIT),
+    };
+    VkGraphicsPipelineCreateInfo mesh_quantized_position_normal_pipeline_info = mesh_pipeline_info;
+    mesh_quantized_position_normal_pipeline_info.stageCount =
+        static_cast<u32>(mesh_quantized_position_normal_stages.size());
+    mesh_quantized_position_normal_pipeline_info.pStages =
+        mesh_quantized_position_normal_stages.data();
+    mesh_quantized_position_normal_pipeline_info.pVertexInputState =
+        &quantized_position_normal_vertex_input;
+    check_vk_result(vkCreateGraphicsPipelines(
+        device,
+        pipeline_cache,
+        1,
+        &mesh_quantized_position_normal_pipeline_info,
+        allocation_callbacks,
+        &mesh_quantized_position_normal_pipeline
     ));
 
     VkPipelineVertexInputStateCreateInfo environment_vertex_input{};
@@ -2574,6 +3080,43 @@ auto Runtime::Impl::create_pipelines() -> void
         static_cast<u32>(shadow_attributes.size());
     shadow_vertex_input.pVertexAttributeDescriptions = shadow_attributes.data();
 
+    const std::array position_normal_shadow_attributes{
+        VkVertexInputAttributeDescription{
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(PositionNormalVertex, position),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo position_normal_shadow_vertex_input{};
+    position_normal_shadow_vertex_input.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    position_normal_shadow_vertex_input.vertexBindingDescriptionCount = 1;
+    position_normal_shadow_vertex_input.pVertexBindingDescriptions = &position_normal_binding;
+    position_normal_shadow_vertex_input.vertexAttributeDescriptionCount =
+        static_cast<u32>(position_normal_shadow_attributes.size());
+    position_normal_shadow_vertex_input.pVertexAttributeDescriptions =
+        position_normal_shadow_attributes.data();
+
+    const std::array quantized_position_shadow_attributes{
+        VkVertexInputAttributeDescription{
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R16G16B16A16_UNORM,
+            .offset = offsetof(QuantizedPositionNormalVertex, position),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo quantized_position_shadow_vertex_input{};
+    quantized_position_shadow_vertex_input.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    quantized_position_shadow_vertex_input.vertexBindingDescriptionCount = 1;
+    quantized_position_shadow_vertex_input.pVertexBindingDescriptions =
+        &quantized_position_normal_binding;
+    quantized_position_shadow_vertex_input.vertexAttributeDescriptionCount =
+        static_cast<u32>(quantized_position_shadow_attributes.size());
+    quantized_position_shadow_vertex_input.pVertexAttributeDescriptions =
+        quantized_position_shadow_attributes.data();
+
     auto shadow_rasterization = rasterization;
     shadow_rasterization.depthBiasEnable = VK_TRUE;
     shadow_rasterization.depthBiasConstantFactor = 1.25f;
@@ -2594,6 +3137,35 @@ auto Runtime::Impl::create_pipelines() -> void
     shadow_pipeline_info.renderPass = shadow_map.render_pass;
     check_vk_result(vkCreateGraphicsPipelines(
         device, pipeline_cache, 1, &shadow_pipeline_info, allocation_callbacks, &shadow_pipeline
+    ));
+
+    VkGraphicsPipelineCreateInfo position_normal_shadow_pipeline_info = shadow_pipeline_info;
+    position_normal_shadow_pipeline_info.pVertexInputState = &position_normal_shadow_vertex_input;
+    check_vk_result(vkCreateGraphicsPipelines(
+        device,
+        pipeline_cache,
+        1,
+        &position_normal_shadow_pipeline_info,
+        allocation_callbacks,
+        &shadow_position_normal_pipeline
+    ));
+
+    const std::array shadow_quantized_position_stages{
+        make_stage(shadow_quantized_position_vert, VK_SHADER_STAGE_VERTEX_BIT),
+    };
+    VkGraphicsPipelineCreateInfo quantized_position_shadow_pipeline_info = shadow_pipeline_info;
+    quantized_position_shadow_pipeline_info.stageCount =
+        static_cast<u32>(shadow_quantized_position_stages.size());
+    quantized_position_shadow_pipeline_info.pStages = shadow_quantized_position_stages.data();
+    quantized_position_shadow_pipeline_info.pVertexInputState =
+        &quantized_position_shadow_vertex_input;
+    check_vk_result(vkCreateGraphicsPipelines(
+        device,
+        pipeline_cache,
+        1,
+        &quantized_position_shadow_pipeline_info,
+        allocation_callbacks,
+        &shadow_quantized_position_pipeline
     ));
 
     const VkVertexInputBindingDescription debug_binding{
@@ -2705,6 +3277,16 @@ auto Runtime::Impl::destroy_pipelines() noexcept -> void
         vkDestroyPipeline(device, shadow_pipeline, allocation_callbacks);
         shadow_pipeline = VK_NULL_HANDLE;
     }
+    if (shadow_position_normal_pipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, shadow_position_normal_pipeline, allocation_callbacks);
+        shadow_position_normal_pipeline = VK_NULL_HANDLE;
+    }
+    if (shadow_quantized_position_pipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, shadow_quantized_position_pipeline, allocation_callbacks);
+        shadow_quantized_position_pipeline = VK_NULL_HANDLE;
+    }
     if (shadow_pipeline_layout != VK_NULL_HANDLE)
     {
         vkDestroyPipelineLayout(device, shadow_pipeline_layout, allocation_callbacks);
@@ -2714,6 +3296,16 @@ auto Runtime::Impl::destroy_pipelines() noexcept -> void
     {
         vkDestroyPipeline(device, mesh_pipeline, allocation_callbacks);
         mesh_pipeline = VK_NULL_HANDLE;
+    }
+    if (mesh_position_normal_pipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, mesh_position_normal_pipeline, allocation_callbacks);
+        mesh_position_normal_pipeline = VK_NULL_HANDLE;
+    }
+    if (mesh_quantized_position_normal_pipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, mesh_quantized_position_normal_pipeline, allocation_callbacks);
+        mesh_quantized_position_normal_pipeline = VK_NULL_HANDLE;
     }
     if (environment_pipeline != VK_NULL_HANDLE)
     {
@@ -2743,8 +3335,10 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
     const auto& mesh_commands = draw_list.mesh_commands();
     const auto& lights = draw_list.lights();
     const auto shadow_index = shadow_light_index(lights);
-    if (mesh_commands.empty() or shadow_index >= lights.size() or shadow_pipeline == VK_NULL_HANDLE
-        or shadow_map.framebuffer == VK_NULL_HANDLE)
+    if (mesh_commands.empty() or shadow_index >= lights.size()
+        or shadow_map.framebuffer == VK_NULL_HANDLE
+        or (shadow_pipeline == VK_NULL_HANDLE and shadow_position_normal_pipeline == VK_NULL_HANDLE
+            and shadow_quantized_position_pipeline == VK_NULL_HANDLE))
     {
         return;
     }
@@ -2778,7 +3372,7 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
     };
     vkCmdSetViewport(command_buffer, 0, 1, &viewport);
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+    auto active_shadow_pipeline = VkPipeline{VK_NULL_HANDLE};
 
     for (const auto& command : mesh_commands)
     {
@@ -2788,13 +3382,36 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
             continue;
         }
         const auto& mesh = meshes[mesh_index];
+        auto desired_pipeline = VkPipeline{VK_NULL_HANDLE};
+        switch (mesh.vertex_format)
+        {
+            case MeshVertexFormat::standard:
+                desired_pipeline = shadow_pipeline;
+                break;
+            case MeshVertexFormat::position_normal:
+                desired_pipeline = shadow_position_normal_pipeline;
+                break;
+            case MeshVertexFormat::quantized_position_normal:
+                desired_pipeline = shadow_quantized_position_pipeline;
+                break;
+        }
+        if (desired_pipeline == VK_NULL_HANDLE)
+        {
+            continue;
+        }
+        if (desired_pipeline != active_shadow_pipeline)
+        {
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, desired_pipeline);
+            active_shadow_pipeline = desired_pipeline;
+        }
+
         const std::array<VkDeviceSize, 1> offsets{0};
         const std::array vertex_buffers{mesh.vertices.handle};
         vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers.data(), offsets.data());
         vkCmdBindIndexBuffer(command_buffer, mesh.indices.handle, 0, VK_INDEX_TYPE_UINT32);
         const MeshPushConstants push{
             .view_projection = shadow_view_projection,
-            .model = command.transform.matrix(),
+            .model = command.transform.matrix() * mesh.position_model,
         };
         vkCmdPushConstants(
             command_buffer,
@@ -2879,7 +3496,9 @@ auto Runtime::Impl::draw_meshes(
 ) -> void
 {
     mesh_batches.clear();
-    if (draw_list.mesh_commands().empty() or mesh_pipeline == VK_NULL_HANDLE)
+    if (draw_list.mesh_commands().empty()
+        or (mesh_pipeline == VK_NULL_HANDLE and mesh_position_normal_pipeline == VK_NULL_HANDLE
+            and mesh_quantized_position_normal_pipeline == VK_NULL_HANDLE))
     {
         return;
     }
@@ -2934,6 +3553,7 @@ auto Runtime::Impl::draw_meshes(
     {
         const auto& command = mesh_commands[command_index];
         const auto mesh_id = command.mesh.id;
+        const auto& mesh = meshes[static_cast<usize>(mesh_id)];
         const auto instance_index = checked_u32(mesh_instance_upload.size(), "mesh instance index");
         const auto material_index = checked_u32(mesh_material_upload.size(), "mesh material index");
         mesh_material_upload.push_back(to_gpu_material(
@@ -2945,7 +3565,9 @@ auto Runtime::Impl::draw_meshes(
             camera_position,
             camera_forward
         ));
-        mesh_instance_upload.push_back(to_gpu_mesh_instance(command.transform, material_index));
+        mesh_instance_upload.push_back(
+            to_gpu_mesh_instance(command.transform, material_index, mesh.position_model)
+        );
 
         if (mesh_batches.empty() or mesh_batches.back().mesh_id != mesh_id)
         {
@@ -2980,7 +3602,6 @@ auto Runtime::Impl::draw_meshes(
     const auto aspect = static_cast<f32>(std::max(1u, extent.width))
                         / static_cast<f32>(std::max(1u, extent.height));
     const auto view_projection = camera.view_projection_matrix(aspect);
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipeline);
     vkCmdBindDescriptorSets(
         command_buffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2999,10 +3620,34 @@ auto Runtime::Impl::draw_meshes(
         command_buffer, mesh_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push
     );
 
+    auto active_mesh_pipeline = VkPipeline{VK_NULL_HANDLE};
     for (const auto& batch : mesh_batches)
     {
         const auto mesh_index = static_cast<usize>(batch.mesh_id);
         const auto& mesh = meshes[mesh_index];
+        auto desired_pipeline = VkPipeline{VK_NULL_HANDLE};
+        switch (mesh.vertex_format)
+        {
+            case MeshVertexFormat::standard:
+                desired_pipeline = mesh_pipeline;
+                break;
+            case MeshVertexFormat::position_normal:
+                desired_pipeline = mesh_position_normal_pipeline;
+                break;
+            case MeshVertexFormat::quantized_position_normal:
+                desired_pipeline = mesh_quantized_position_normal_pipeline;
+                break;
+        }
+        if (desired_pipeline == VK_NULL_HANDLE)
+        {
+            continue;
+        }
+        if (desired_pipeline != active_mesh_pipeline)
+        {
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, desired_pipeline);
+            active_mesh_pipeline = desired_pipeline;
+        }
+
         const std::array<VkDeviceSize, 1> offsets{0};
         const std::array vertex_buffers{mesh.vertices.handle};
         vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers.data(), offsets.data());
@@ -3608,10 +4253,15 @@ auto Runtime::Impl::shutdown() noexcept -> void
     mesh_lighting_buffers.clear();
     mesh_lighting_upload = {};
 
+    for (auto& retired : retired_meshes)
+    {
+        destroy_mesh_resource(retired.resource);
+    }
+    retired_meshes.clear();
+
     for (auto& mesh : meshes)
     {
-        destroy_buffer(mesh.vertices);
-        destroy_buffer(mesh.indices);
+        destroy_mesh_resource(mesh);
     }
     meshes.clear();
 
@@ -3685,7 +4335,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
     auto done = false;
     auto orbiting = false;
     auto panning = false;
-    auto frame_counter = 0u;
+    frame_counter = 0u;
     auto previous = std::chrono::steady_clock::now();
     pending_screenshot = config.screenshot_path;
     pending_screenshot_transparent = config.transparent_screenshot;
@@ -3746,6 +4396,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
         check_vk_result(vkWaitForFences(device, 1, &frame->Fence, VK_TRUE, UINT64_MAX));
         check_vk_result(vkResetFences(device, 1, &frame->Fence));
         check_vk_result(vkResetCommandPool(device, frame->CommandPool, 0));
+        collect_retired_meshes();
 
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -3766,7 +4417,10 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
             .command_buffer = frame->CommandBuffer,
             .allocator = vma_allocator,
             .extent = extent,
-            .frame_index = frame_counter,
+            .frame_index = checked_u32(static_cast<usize>(frame_counter), "runtime frame index"),
+            .swapchain_image_index = window_data.FrameIndex,
+            .swapchain_image_count =
+                checked_u32(static_cast<usize>(window_data.ImageCount), "swapchain image count"),
             .dt_seconds = dt_seconds,
             .camera = camera,
             .draw = draw_list,
@@ -3918,9 +4572,44 @@ auto Runtime::upload_mesh(const MeshData& mesh) -> MeshHandle
     return impl_->upload_mesh(mesh);
 }
 
+auto Runtime::upload_mesh(const PositionNormalMeshData& mesh) -> MeshHandle
+{
+    return impl_->upload_mesh(mesh);
+}
+
+auto Runtime::upload_mesh(const QuantizedPositionNormalMeshData& mesh) -> MeshHandle
+{
+    return impl_->upload_mesh(mesh);
+}
+
+auto Runtime::reserve_mesh_capacity(const MeshReserveConfig& cfg) -> MeshHandle
+{
+    return impl_->reserve_mesh_capacity(cfg);
+}
+
 auto Runtime::replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle
 {
     return impl_->replace_mesh(handle, mesh);
+}
+
+auto Runtime::update_mesh(MeshHandle handle, const MeshData& mesh, const MeshUpdateConfig& cfg)
+    -> MeshHandle
+{
+    return impl_->update_mesh(handle, mesh, cfg);
+}
+
+auto Runtime::update_mesh(
+    MeshHandle handle, const PositionNormalMeshData& mesh, const MeshUpdateConfig& cfg
+) -> MeshHandle
+{
+    return impl_->update_mesh(handle, mesh, cfg);
+}
+
+auto Runtime::update_mesh(
+    MeshHandle handle, const QuantizedPositionNormalMeshData& mesh, const MeshUpdateConfig& cfg
+) -> MeshHandle
+{
+    return impl_->update_mesh(handle, mesh, cfg);
 }
 
 auto Runtime::load_texture(const std::filesystem::path& path, const TextureLoadConfig& config)
