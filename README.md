@@ -38,17 +38,19 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The app target is `ds_vk_basic_app` when Vulkan and `glslc` are available.
+The default app target is `ds_vk_quake_app` when Vulkan and `glslc` are available.
 
 ```sh
 ./run.sh
+./run.sh --app basic
 ./run.sh --app vectorfield
 ./run.sh --app dfsph
 ./run.sh --app pba
-./run.sh --smoke-frames 20 --screenshot run/basic.png --hide-ui
+./run.sh --app basic --smoke-frames 20 --screenshot run/basic.png --hide-ui
 ./run.sh --app vectorfield --smoke-frames 20 --screenshot run/vectorfield.png --hide-ui
 ./run.sh --app dfsph --smoke-frames 20 --screenshot run/dfsph.png --hide-ui
 ./run.sh --app pba --smoke-frames 20 --screenshot run/pba.png --hide-ui
+./build/ds_vk_quake_app
 ./build/ds_vk_basic_app
 ./build/ds_vk_vectorfield_app
 ./build/ds_vk_basic_app --smoke-frames 20 --screenshot run/basic.png --hide-ui

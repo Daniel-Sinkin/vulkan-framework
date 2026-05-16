@@ -5,12 +5,12 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${repo_root}"
 
 build_dir="${DS_VK_BUILD_DIR:-build}"
-app_name="${DS_VK_APP:-basic}"
+app_name="${DS_VK_APP:-quake}"
 
 while [[ $# -gt 0 ]]; do
     case "${1}" in
         --app)
-            app_name="${2:-basic}"
+            app_name="${2:-quake}"
             shift 2
             ;;
         --)
