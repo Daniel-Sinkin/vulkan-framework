@@ -39,18 +39,22 @@ class ColorRamp
   public:
     explicit ColorRamp(ColorRampConfig config = {}) noexcept;
 
-    auto configure(const ColorRampConfig& config) noexcept -> ColorRamp&;
+    // clang-format off
+    auto configure(const ColorRampConfig& config) noexcept        -> ColorRamp&;
 
-    [[nodiscard]] auto sample(f32 value) const noexcept -> Color;
+    [[nodiscard]] auto sample(f32 value) const noexcept           -> Color;
     [[nodiscard]] auto normalized_value(f32 value) const noexcept -> f32;
-    [[nodiscard]] auto config() const noexcept -> const ColorRampConfig&;
+    [[nodiscard]] auto config() const noexcept                    -> const ColorRampConfig&;
+    // clang-format on
 
   private:
     ColorRampConfig config_{};
 };
 
+// clang-format off
 [[nodiscard]] auto sample_color(ColorPreset preset, f32 normalized_value) noexcept -> Color;
-[[nodiscard]] auto range_from_values(std::span<const f32> values) noexcept -> ScalarRange;
+[[nodiscard]] auto range_from_values(std::span<const f32> values) noexcept         -> ScalarRange;
+// clang-format on
 
 struct VectorFieldConfig
 {
@@ -72,6 +76,16 @@ struct CrossMarkerConfig
     f32 radius{0.08f};
     Color color{1.0f, 0.0f, 0.85f, 1.0f};
     f32 width{0.012f};
+};
+
+struct TrailConfig
+{
+    std::span<const Vec3> points{};
+    Color color{1.0f, 0.72f, 0.20f, 1.0f};
+    f32 width{0.007f};
+    bool fade_alpha{true};
+    f32 tail_alpha{0.22f};
+    f32 head_alpha{1.0f};
 };
 
 template <typename DrawSink>
@@ -132,5 +146,37 @@ auto draw_cross_marker(DrawSink& draw, const CrossMarkerConfig& config) -> usize
         }
     );
     return 2zu;
+}
+
+template <typename DrawSink>
+auto draw_trail(DrawSink& draw, const TrailConfig& config) -> usize
+{
+    if (config.points.size() < 2zu)
+    {
+        return 0zu;
+    }
+
+    const auto segment_count = config.points.size() - 1zu;
+    for (auto i = 0zu; i < segment_count; ++i)
+    {
+        auto color = config.color;
+        if (config.fade_alpha)
+        {
+            const auto denom = std::max(1zu, segment_count - 1zu);
+            const auto t = static_cast<f32>(i) / static_cast<f32>(denom);
+            color = with_alpha(
+                color, std::lerp(config.tail_alpha, config.head_alpha, std::clamp(t, 0.0f, 1.0f))
+            );
+        }
+        draw.debug_line(
+            DebugLineConfig{
+                .start = config.points[i],
+                .end = config.points[i + 1zu],
+                .color = color,
+                .width = config.width,
+            }
+        );
+    }
+    return segment_count;
 }
 }  // namespace ds_vk::viz

@@ -105,62 +105,63 @@ auto ColorRamp::config() const noexcept -> const ColorRampConfig&
 
 auto sample_color(ColorPreset preset, f32 normalized_value) noexcept -> Color
 {
-    if (preset == ColorPreset::grayscale)
+    switch (preset)
     {
-        return grayscale(normalized_value);
+        case ColorPreset::grayscale:
+            return grayscale(normalized_value);
+        case ColorPreset::blue_red:
+            {
+                static constexpr auto stops = std::array{
+                    ColorStop{.t = 0.00f, .color = {0.10f, 0.18f, 0.84f}},
+                    ColorStop{.t = 0.25f, .color = {0.12f, 0.68f, 0.92f}},
+                    ColorStop{.t = 0.50f, .color = {0.96f, 0.96f, 0.90f}},
+                    ColorStop{.t = 0.75f, .color = {0.98f, 0.70f, 0.16f}},
+                    ColorStop{.t = 1.00f, .color = {0.82f, 0.08f, 0.12f}},
+                };
+                return sample_stops(stops, normalized_value);
+            }
+        case ColorPreset::viridis:
+            {
+                static constexpr auto stops = std::array{
+                    ColorStop{.t = 0.00f, .color = {0.267f, 0.005f, 0.329f}},
+                    ColorStop{.t = 0.15f, .color = {0.283f, 0.141f, 0.458f}},
+                    ColorStop{.t = 0.30f, .color = {0.254f, 0.265f, 0.530f}},
+                    ColorStop{.t = 0.45f, .color = {0.207f, 0.372f, 0.553f}},
+                    ColorStop{.t = 0.60f, .color = {0.128f, 0.567f, 0.551f}},
+                    ColorStop{.t = 0.75f, .color = {0.267f, 0.749f, 0.441f}},
+                    ColorStop{.t = 1.00f, .color = {0.993f, 0.906f, 0.144f}},
+                };
+                return sample_stops(stops, normalized_value);
+            }
+        case ColorPreset::magma:
+            {
+                static constexpr auto stops = std::array{
+                    ColorStop{.t = 0.00f, .color = {0.001f, 0.000f, 0.014f}},
+                    ColorStop{.t = 0.17f, .color = {0.111f, 0.064f, 0.262f}},
+                    ColorStop{.t = 0.34f, .color = {0.316f, 0.071f, 0.485f}},
+                    ColorStop{.t = 0.50f, .color = {0.594f, 0.176f, 0.501f}},
+                    ColorStop{.t = 0.67f, .color = {0.857f, 0.360f, 0.410f}},
+                    ColorStop{.t = 0.84f, .color = {0.988f, 0.647f, 0.211f}},
+                    ColorStop{.t = 1.00f, .color = {0.987f, 0.991f, 0.749f}},
+                };
+                return sample_stops(stops, normalized_value);
+            }
+        case ColorPreset::turbo:
+            {
+                static constexpr auto stops = std::array{
+                    ColorStop{.t = 0.00f, .color = {0.190f, 0.072f, 0.232f}},
+                    ColorStop{.t = 0.14f, .color = {0.145f, 0.365f, 0.901f}},
+                    ColorStop{.t = 0.28f, .color = {0.023f, 0.627f, 0.886f}},
+                    ColorStop{.t = 0.42f, .color = {0.187f, 0.808f, 0.559f}},
+                    ColorStop{.t = 0.56f, .color = {0.627f, 0.897f, 0.196f}},
+                    ColorStop{.t = 0.70f, .color = {0.956f, 0.706f, 0.095f}},
+                    ColorStop{.t = 0.84f, .color = {0.892f, 0.314f, 0.087f}},
+                    ColorStop{.t = 1.00f, .color = {0.480f, 0.016f, 0.010f}},
+                };
+                return sample_stops(stops, normalized_value);
+            }
     }
-
-    if (preset == ColorPreset::blue_red)
-    {
-        static constexpr auto stops = std::array{
-            ColorStop{.t = 0.00f, .color = {0.10f, 0.18f, 0.84f}},
-            ColorStop{.t = 0.25f, .color = {0.12f, 0.68f, 0.92f}},
-            ColorStop{.t = 0.50f, .color = {0.96f, 0.96f, 0.90f}},
-            ColorStop{.t = 0.75f, .color = {0.98f, 0.70f, 0.16f}},
-            ColorStop{.t = 1.00f, .color = {0.82f, 0.08f, 0.12f}},
-        };
-        return sample_stops(stops, normalized_value);
-    }
-
-    if (preset == ColorPreset::viridis)
-    {
-        static constexpr auto stops = std::array{
-            ColorStop{.t = 0.00f, .color = {0.267f, 0.005f, 0.329f}},
-            ColorStop{.t = 0.15f, .color = {0.283f, 0.141f, 0.458f}},
-            ColorStop{.t = 0.30f, .color = {0.254f, 0.265f, 0.530f}},
-            ColorStop{.t = 0.45f, .color = {0.207f, 0.372f, 0.553f}},
-            ColorStop{.t = 0.60f, .color = {0.128f, 0.567f, 0.551f}},
-            ColorStop{.t = 0.75f, .color = {0.267f, 0.749f, 0.441f}},
-            ColorStop{.t = 1.00f, .color = {0.993f, 0.906f, 0.144f}},
-        };
-        return sample_stops(stops, normalized_value);
-    }
-
-    if (preset == ColorPreset::magma)
-    {
-        static constexpr auto stops = std::array{
-            ColorStop{.t = 0.00f, .color = {0.001f, 0.000f, 0.014f}},
-            ColorStop{.t = 0.17f, .color = {0.111f, 0.064f, 0.262f}},
-            ColorStop{.t = 0.34f, .color = {0.316f, 0.071f, 0.485f}},
-            ColorStop{.t = 0.50f, .color = {0.594f, 0.176f, 0.501f}},
-            ColorStop{.t = 0.67f, .color = {0.857f, 0.360f, 0.410f}},
-            ColorStop{.t = 0.84f, .color = {0.988f, 0.647f, 0.211f}},
-            ColorStop{.t = 1.00f, .color = {0.987f, 0.991f, 0.749f}},
-        };
-        return sample_stops(stops, normalized_value);
-    }
-
-    static constexpr auto turbo_stops = std::array{
-        ColorStop{.t = 0.00f, .color = {0.190f, 0.072f, 0.232f}},
-        ColorStop{.t = 0.14f, .color = {0.145f, 0.365f, 0.901f}},
-        ColorStop{.t = 0.28f, .color = {0.023f, 0.627f, 0.886f}},
-        ColorStop{.t = 0.42f, .color = {0.187f, 0.808f, 0.559f}},
-        ColorStop{.t = 0.56f, .color = {0.627f, 0.897f, 0.196f}},
-        ColorStop{.t = 0.70f, .color = {0.956f, 0.706f, 0.095f}},
-        ColorStop{.t = 0.84f, .color = {0.892f, 0.314f, 0.087f}},
-        ColorStop{.t = 1.00f, .color = {0.480f, 0.016f, 0.010f}},
-    };
-    return sample_stops(turbo_stops, normalized_value);
+    return grayscale(normalized_value);
 }
 
 auto range_from_values(std::span<const f32> values) noexcept -> ScalarRange
@@ -170,20 +171,19 @@ auto range_from_values(std::span<const f32> values) noexcept -> ScalarRange
     auto max_value = 0.0f;
     for (const auto value : values)
     {
-        if (std::isfinite(value))
+        if (!std::isfinite(value))
         {
-            if (!found)
-            {
-                min_value = value;
-                max_value = value;
-                found = true;
-            }
-            else
-            {
-                min_value = std::min(min_value, value);
-                max_value = std::max(max_value, value);
-            }
+            continue;
         }
+        if (!found)
+        {
+            min_value = value;
+            max_value = value;
+            found = true;
+            continue;
+        }
+        min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
     }
 
     if (!found)

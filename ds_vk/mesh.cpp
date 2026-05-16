@@ -139,14 +139,18 @@ auto make_cube(f32 side_length, Color color) -> MeshData
     return mesh;
 }
 
-auto make_uv_sphere(f32 radius, u32 slices_raw, u32 stacks_raw, Color color) -> MeshData
+auto make_uv_sphere(const UvSphereConfig& config) -> MeshData
 {
-    const auto slices = std::max(3u, slices_raw);
-    const auto stacks = std::max(2u, stacks_raw);
-    const auto safe_radius = std::max(0.0f, radius);
+    const auto slices = std::max(3u, config.slices);
+    const auto stacks = std::max(2u, config.stacks);
+    const auto safe_radius = std::max(0.0f, config.radius);
     auto mesh = MeshData{};
-    mesh.vertices.reserve(static_cast<usize>(slices + 1u) * static_cast<usize>(stacks + 1u));
-    mesh.indices.reserve(static_cast<usize>(slices) * static_cast<usize>(stacks) * 6zu);
+
+    const auto n_vertices = static_cast<usize>(slices + 1u) * static_cast<usize>(stacks + 1u);
+    const auto n_indices = static_cast<usize>(slices) * static_cast<usize>(stacks) * 6zu;
+
+    mesh.vertices.reserve(n_vertices);
+    mesh.indices.reserve(n_indices);
 
     for (u32 stack = 0; stack <= stacks; ++stack)
     {
@@ -167,7 +171,7 @@ auto make_uv_sphere(f32 radius, u32 slices_raw, u32 stacks_raw, Color color) -> 
                 Vertex{
                     .position = normal * safe_radius,
                     .normal = normal,
-                    .color = color,
+                    .color = config.color,
                     .texcoord = {u, v},
                 }
             );
@@ -191,7 +195,7 @@ auto make_uv_sphere(f32 radius, u32 slices_raw, u32 stacks_raw, Color color) -> 
     return mesh;
 }
 
-auto bounds_of(const MeshData& mesh) -> Bounds
+auto aabb_of(const MeshData& mesh) -> Aabb
 {
     if (mesh.vertices.empty())
     {
@@ -205,7 +209,7 @@ auto bounds_of(const MeshData& mesh) -> Bounds
         min_value = glm::min(min_value, vertex.position);
         max_value = glm::max(max_value, vertex.position);
     }
-    return Bounds{.min = min_value, .max = max_value};
+    return Aabb{.min = min_value, .max = max_value};
 }
 
 auto triangle_count(const MeshData& mesh) noexcept -> usize

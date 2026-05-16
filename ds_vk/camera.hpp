@@ -28,41 +28,42 @@ struct CameraConfig
 class Camera
 {
   public:
-    auto configure(const CameraConfig& config) noexcept -> Camera&;
+    // clang-format off
+    auto configure(const CameraConfig& config) noexcept                                     -> Camera&;
 
-    [[nodiscard]] auto pivot() noexcept -> Vec3&;
-    [[nodiscard]] auto pivot() const noexcept -> const Vec3&;
-    [[nodiscard]] auto distance() noexcept -> f32&;
-    [[nodiscard]] auto distance() const noexcept -> f32;
-    [[nodiscard]] auto yaw() noexcept -> f32&;
-    [[nodiscard]] auto yaw() const noexcept -> f32;
-    [[nodiscard]] auto pitch() noexcept -> f32&;
-    [[nodiscard]] auto pitch() const noexcept -> f32;
-    [[nodiscard]] auto fov_y() noexcept -> f32&;
-    [[nodiscard]] auto fov_y() const noexcept -> f32;
-    [[nodiscard]] auto orbit_sensitivity() noexcept -> f32&;
-    [[nodiscard]] auto orbit_sensitivity() const noexcept -> f32;
-    [[nodiscard]] auto pivot_sensitivity() noexcept -> f32&;
-    [[nodiscard]] auto pivot_sensitivity() const noexcept -> f32;
-    [[nodiscard]] auto zoom_sensitivity() noexcept -> f32&;
-    [[nodiscard]] auto zoom_sensitivity() const noexcept -> f32;
-    [[nodiscard]] auto z_near() noexcept -> f32&;
-    [[nodiscard]] auto z_near() const noexcept -> f32;
-    [[nodiscard]] auto z_far() noexcept -> f32&;
-    [[nodiscard]] auto z_far() const noexcept -> f32;
-    [[nodiscard]] auto projection_mode() noexcept -> ProjectionMode&;
-    [[nodiscard]] auto projection_mode() const noexcept -> ProjectionMode;
+    [[nodiscard]] auto pivot() noexcept                                                     -> Vec3&;
+    [[nodiscard]] auto pivot() const noexcept                                               -> const Vec3&;
+    [[nodiscard]] auto distance() noexcept                                                  -> f32&;
+    [[nodiscard]] auto distance() const noexcept                                            -> f32;
+    [[nodiscard]] auto yaw() noexcept                                                       -> f32&;
+    [[nodiscard]] auto yaw() const noexcept                                                 -> f32;
+    [[nodiscard]] auto pitch() noexcept                                                     -> f32&;
+    [[nodiscard]] auto pitch() const noexcept                                               -> f32;
+    [[nodiscard]] auto fov_y() noexcept                                                     -> f32&;
+    [[nodiscard]] auto fov_y() const noexcept                                               -> f32;
+    [[nodiscard]] auto orbit_sensitivity() noexcept                                         -> f32&;
+    [[nodiscard]] auto orbit_sensitivity() const noexcept                                   -> f32;
+    [[nodiscard]] auto pivot_sensitivity() noexcept                                         -> f32&;
+    [[nodiscard]] auto pivot_sensitivity() const noexcept                                   -> f32;
+    [[nodiscard]] auto zoom_sensitivity() noexcept                                          -> f32&;
+    [[nodiscard]] auto zoom_sensitivity() const noexcept                                    -> f32;
+    [[nodiscard]] auto z_near() noexcept                                                    -> f32&;
+    [[nodiscard]] auto z_near() const noexcept                                              -> f32;
+    [[nodiscard]] auto z_far() noexcept                                                     -> f32&;
+    [[nodiscard]] auto z_far() const noexcept                                               -> f32;
+    [[nodiscard]] auto projection_mode() noexcept                                           -> ProjectionMode&;
+    [[nodiscard]] auto projection_mode() const noexcept                                     -> ProjectionMode;
 
-    [[nodiscard]] auto position() const noexcept -> Vec3;
-    [[nodiscard]] auto view_matrix() const noexcept -> Mat4;
-    [[nodiscard]] auto projection_matrix(f32 aspect) const noexcept -> Mat4;
-    [[nodiscard]] auto view_projection_matrix(f32 aspect) const noexcept -> Mat4;
-    [[nodiscard]] auto right() const noexcept -> Vec3;
-    [[nodiscard]] auto up() const noexcept -> Vec3;
-    [[nodiscard]] auto view_height() const noexcept -> f32;
-    [[nodiscard]] auto units_per_pixel_y(f32 viewport_height_px) const noexcept -> f32;
-    [[nodiscard]] auto pan_offset_world(f32 dx_px, f32 dy_px, f32 viewport_height_px) const noexcept
-        -> Vec3;
+    [[nodiscard]] auto position() const noexcept                                                     -> Vec3;
+    [[nodiscard]] auto view_matrix() const noexcept                                                  -> Mat4;
+    [[nodiscard]] auto projection_matrix(f32 aspect) const noexcept                                  -> Mat4;
+    [[nodiscard]] auto view_projection_matrix(f32 aspect) const noexcept                             -> Mat4;
+    [[nodiscard]] auto right() const noexcept                                                        -> Vec3;
+    [[nodiscard]] auto up() const noexcept                                                           -> Vec3;
+    [[nodiscard]] auto view_height() const noexcept                                                  -> f32;
+    [[nodiscard]] auto units_per_pixel_y(f32 viewport_height_px) const noexcept                      -> f32;
+    [[nodiscard]] auto pan_offset_world(f32 dx_px, f32 dy_px, f32 viewport_height_px) const noexcept -> Vec3;
+    // clang-format on
 
   private:
     Vec3 pivot_{0.0f, 0.0f, 0.5f};

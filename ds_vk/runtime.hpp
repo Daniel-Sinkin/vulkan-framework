@@ -154,7 +154,7 @@ struct RadialLightConfig
 struct SpotLightConfig
 {
     Vec3 position{0.0f, 0.0f, 3.0f};
-    Vec3 direction{0.0f, 0.0f, -1.0f};
+    Vec3 direction{-k_axis_z};
     Color color{Color::white};
     f32 intensity{18.0f};
     f32 range{7.0f};
@@ -167,22 +167,24 @@ struct SpotLightConfig
 class DrawList
 {
   public:
-    auto clear() -> void;
-    auto set_ambient_light(Color color) -> void;
-    auto draw_mesh(const MeshDrawConfig& config) -> void;
-    auto draw_basic_mesh(const BasicMeshDrawConfig& config) -> void;
-    auto debug_line(const DebugLineConfig& config) -> void;
-    auto debug_arrow(const DebugArrowConfig& config) -> void;
-    auto debug_sphere(const DebugSphereConfig& config) -> void;
-    auto add_light(const LightConfig& config) -> void;
-    auto directional_light(const DirectionalLightConfig& config) -> void;
-    auto radial_light(const RadialLightConfig& config) -> void;
-    auto spot_light(const SpotLightConfig& config) -> void;
+    // clang-format off
+    auto clear()                                                       -> void;
+    auto set_ambient_light(Color color)                                -> void;
+    auto draw_mesh(const MeshDrawConfig& config)                       -> void;
+    auto draw_basic_mesh(const BasicMeshDrawConfig& config)            -> void;
+    auto debug_line(const DebugLineConfig& config)                     -> void;
+    auto debug_arrow(const DebugArrowConfig& config)                   -> void;
+    auto debug_sphere(const DebugSphereConfig& config)                 -> void;
+    auto add_light(const LightConfig& config)                          -> void;
+    auto directional_light(const DirectionalLightConfig& config)       -> void;
+    auto radial_light(const RadialLightConfig& config)                 -> void;
+    auto spot_light(const SpotLightConfig& config)                     -> void;
 
-    [[nodiscard]] auto mesh_commands() const noexcept -> const std::vector<MeshDrawCommand>&;
-    [[nodiscard]] auto debug_segments() const noexcept -> const std::vector<DebugSegment>&;
-    [[nodiscard]] auto lights() const noexcept -> const std::vector<LightConfig>&;
-    [[nodiscard]] auto ambient_light() const noexcept -> Color;
+    [[nodiscard]] auto mesh_commands() const noexcept                  -> const std::vector<MeshDrawCommand>&;
+    [[nodiscard]] auto debug_segments() const noexcept                 -> const std::vector<DebugSegment>&;
+    [[nodiscard]] auto lights() const noexcept                         -> const std::vector<LightConfig>&;
+    [[nodiscard]] auto ambient_light() const noexcept                  -> Color;
+    // clang-format on
 
   private:
     std::vector<MeshDrawCommand> mesh_commands_{};
@@ -363,19 +365,18 @@ class Runtime
         return run_callbacks(callbacks);
     }
 
-    [[nodiscard]] auto upload_mesh(const MeshData& mesh) -> MeshHandle;
-    [[nodiscard]] auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
-    [[nodiscard]] auto
-    load_texture(const std::filesystem::path& path, const TextureLoadConfig& config = {})
-        -> TextureHandle;
-    auto request_screenshot(std::filesystem::path path, bool transparent = false) -> void;
+    // clang-format off
+    [[nodiscard]] auto upload_mesh(const MeshData& mesh)                                                     -> MeshHandle;
+    [[nodiscard]] auto replace_mesh(MeshHandle handle, const MeshData& mesh)                                 -> MeshHandle;
+    [[nodiscard]] auto load_texture(const std::filesystem::path& path, const TextureLoadConfig& config = {}) -> TextureHandle;
+    auto request_screenshot(std::filesystem::path path, bool transparent = false)                            -> void;
 
-    auto camera(const CameraConfig& config) noexcept -> Camera&;
-    [[nodiscard]] auto camera() noexcept -> Camera&;
-    [[nodiscard]] auto camera() const noexcept -> const Camera&;
-    [[nodiscard]] auto stats() const noexcept -> const RuntimeStats&;
-    [[nodiscard]] auto descriptor_indexing_support() const noexcept
-        -> const DescriptorIndexingSupport&;
+    auto camera(const CameraConfig& config) noexcept                                            -> Camera&;
+    [[nodiscard]] auto camera() noexcept                                                        -> Camera&;
+    [[nodiscard]] auto camera() const noexcept                                                  -> const Camera&;
+    [[nodiscard]] auto stats() const noexcept                                                   -> const RuntimeStats&;
+    [[nodiscard]] auto descriptor_indexing_support() const noexcept                             -> const DescriptorIndexingSupport&;
+    // clang-format on
 
   private:
     auto run_callbacks(const detail::RuntimeCallbacks& callbacks) -> int;

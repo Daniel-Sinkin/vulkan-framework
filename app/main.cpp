@@ -400,8 +400,7 @@ class BasicViewerApp final
     {
         static_cast<void>(picker_.add_sphere({
             .object_id = object_ids_.sphere,
-            .center = sphere_position_,
-            .radius = sphere_radius_,
+            .sphere = {.center = sphere_position_, .radius = sphere_radius_},
         }));
 
         if (!hide_cube_)
@@ -409,22 +408,25 @@ class BasicViewerApp final
             const auto cube = cube_transform();
             static_cast<void>(picker_.add_obb({
                 .object_id = object_ids_.cube,
-                .center = cube.translation,
-                .half_extent = 0.5f * glm::abs(cube.scale),
-                .rotation = cube.rotation,
+                .obb = {
+                    .center = cube.translation,
+                    .half_extent = 0.5f * glm::abs(cube.scale),
+                    .rotation = cube.rotation,
+                },
             }));
         }
         const auto column = column_transform();
         static_cast<void>(picker_.add_obb({
             .object_id = object_ids_.column,
-            .center = column.translation,
-            .half_extent = 0.5f * glm::abs(column.scale),
-            .rotation = column.rotation,
+            .obb = {
+                .center = column.translation,
+                .half_extent = 0.5f * glm::abs(column.scale),
+                .rotation = column.rotation,
+            },
         }));
         static_cast<void>(picker_.add_sphere({
             .object_id = object_ids_.small_sphere,
-            .center = small_sphere_position_,
-            .radius = 0.36f,
+            .sphere = {.center = small_sphere_position_, .radius = 0.36f},
         }));
     }
 
@@ -582,8 +584,14 @@ class BasicViewerApp final
     auto rebuild_sphere() -> void
     {
         if (runtime_ == nullptr) return;
-        const auto sphere =
-            make_uv_sphere(1.0f, sphere_slices_, sphere_stacks_, ds_vk::Color::white);
+        const auto sphere = make_uv_sphere(
+            UvSphereConfig{
+                .radius = 1.0f,
+                .slices = sphere_slices_,
+                .stacks = sphere_stacks_,
+                .color = ds_vk::Color::white,
+            }
+        );
         sphere_mesh_ = sphere_mesh_.valid() ? runtime_->replace_mesh(sphere_mesh_, sphere)
                                             : runtime_->upload_mesh(sphere);
     }
@@ -596,7 +604,7 @@ class BasicViewerApp final
     TextureHandle floor_texture_{};
     TextureHandle cube_texture_{};
     ObjectId selected_object_id_{};
-    Vec3 sphere_position_{0.0f, 0.0f, 1.0f};
+    Vec3 sphere_position_{k_axis_z};
     Vec3 small_sphere_position_{1.15f, -1.45f, 0.42f};
     f32 sphere_radius_{0.75f};
     u32 sphere_slices_{40u};

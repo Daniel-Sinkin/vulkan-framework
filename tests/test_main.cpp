@@ -1,8 +1,8 @@
 #include "ds_vk/camera.hpp"
+#include "ds_vk/geometry.hpp"
 #include "ds_vk/mesh.hpp"
 #include "ds_vk/plugins/picker.hpp"
 #include "ds_vk/plugins/viz.hpp"
-#include "ds_vk/selection.hpp"
 
 #include <array>
 #include <cmath>
@@ -43,12 +43,19 @@ struct FakeDrawSink
 {
     ds_vk::usize line_count{};
     ds_vk::usize arrow_count{};
+    ds_vk::Color first_line_color{};
+    ds_vk::Color last_line_color{};
     ds_vk::Vec3 last_arrow_origin{};
     ds_vk::Vec3 last_arrow_vector{};
     ds_vk::Color last_arrow_color;
 
-    auto debug_line(const auto&) noexcept -> void
+    auto debug_line(const auto& config) noexcept -> void
     {
+        if (line_count == 0zu)
+        {
+            first_line_color = config.color;
+        }
+        last_line_color = config.color;
         ++line_count;
     }
 
@@ -98,10 +105,10 @@ auto test_quad_mesh() -> void
     check(ds_vk::triangle_count(mesh) == 2u, "quad triangle count");
     check(near(mesh.vertices[0].texcoord.x, 0.0f), "quad has uvs");
     check(near(mesh.vertices[2].texcoord.y, 1.0f), "quad uv max y");
-    const auto bounds = ds_vk::bounds_of(mesh);
-    check(near(bounds.min.x, -1.0f) && near(bounds.max.x, 1.0f), "quad x bounds");
-    check(near(bounds.min.y, -1.0f) && near(bounds.max.y, 1.0f), "quad y bounds");
-    check(near(bounds.min.z, 0.0f) && near(bounds.max.z, 0.0f), "quad lies on z=0");
+    const auto aabb = ds_vk::aabb_of(mesh);
+    check(near(aabb.min.x, -1.0f) && near(aabb.max.x, 1.0f), "quad x bounds");
+    check(near(aabb.min.y, -1.0f) && near(aabb.max.y, 1.0f), "quad y bounds");
+    check(near(aabb.min.z, 0.0f) && near(aabb.max.z, 0.0f), "quad lies on z=0");
 }
 
 auto test_cube_mesh() -> void
@@ -123,7 +130,13 @@ auto test_sphere_mesh() -> void
 {
     constexpr auto slices = 12u;
     constexpr auto stacks = 6u;
-    const auto mesh = ds_vk::make_uv_sphere(2.0f, slices, stacks);
+    const auto mesh = ds_vk::make_uv_sphere(
+        ds_vk::UvSphereConfig{
+            .radius = 2.0f,
+            .slices = slices,
+            .stacks = stacks,
+        }
+    );
     const auto expected_vertices =
         static_cast<ds_vk::usize>(slices + 1u) * static_cast<ds_vk::usize>(stacks + 1u);
     const auto expected_indices =
@@ -198,15 +211,15 @@ auto test_camera_config() -> void
     check(near(camera.fov_y(), glm::radians(55.0f)), "camera config preserves defaults");
 }
 
-auto test_selection_helpers() -> void
+auto test_geometry_helpers() -> void
 {
-    const auto ray = ds_vk::PickRay{
+    const auto ray = ds_vk::Ray{
         .origin = {0.0f, 0.0f, 0.0f},
-        .direction = {1.0f, 0.0f, 0.0f},
+        .direction = ds_vk::k_axis_x,
     };
     const auto sphere_hit = ds_vk::intersect_sphere(
         ray,
-        ds_vk::PickSphere{
+        ds_vk::Sphere{
             .center = {3.0f, 0.0f, 0.0f},
             .radius = 1.0f,
         }
@@ -215,7 +228,7 @@ auto test_selection_helpers() -> void
 
     const auto sphere_miss = ds_vk::intersect_sphere(
         ray,
-        ds_vk::PickSphere{
+        ds_vk::Sphere{
             .center = {0.0f, 3.0f, 0.0f},
             .radius = 0.5f,
         }
@@ -224,7 +237,7 @@ auto test_selection_helpers() -> void
 
     const auto aabb_hit = ds_vk::intersect_aabb(
         ray,
-        ds_vk::PickAabb{
+        ds_vk::Aabb{
             .min = {4.0f, -1.0f, -1.0f},
             .max = {5.0f, 1.0f, 1.0f},
         }
@@ -233,7 +246,7 @@ auto test_selection_helpers() -> void
 
     const auto reversed_aabb_hit = ds_vk::intersect_aabb(
         ray,
-        ds_vk::PickAabb{
+        ds_vk::Aabb{
             .min = {5.0f, 1.0f, 1.0f},
             .max = {4.0f, -1.0f, -1.0f},
         }
@@ -243,30 +256,17 @@ auto test_selection_helpers() -> void
         "pick ray normalizes reversed aabb bounds"
     );
 
-    const auto candidates = std::array{
-        ds_vk::PickCandidate{
-            .object_id = {.value = 7u},
-            .type = ds_vk::PickShapeType::sphere,
-            .sphere = {.center = {6.0f, 0.0f, 0.0f}, .radius = 1.0f},
-        },
-        ds_vk::PickCandidate{
-            .object_id = {.value = 3u},
-            .type = ds_vk::PickShapeType::aabb,
-            .aabb = {.min = {2.0f, -0.5f, -0.5f}, .max = {3.0f, 0.5f, 0.5f}},
-        },
-        ds_vk::PickCandidate{
-            .object_id = {},
-            .type = ds_vk::PickShapeType::sphere,
-            .sphere = {.center = {1.0f, 0.0f, 0.0f}, .radius = 0.25f},
-        },
-    };
-    const auto hit = ds_vk::pick_nearest(ray, candidates);
-    check(hit.has_value(), "pick nearest returns a hit");
-    if (hit.has_value())
-    {
-        check(hit->object_id.value == 3u, "pick nearest ignores invalid ids and picks nearest");
-        check(near(hit->distance, 2.0f), "pick nearest records distance");
-    }
+    const auto obb_hit = ds_vk::hit_obb(
+        ds_vk::Ray{.origin = {0.0f, 0.0f, 0.0f}, .direction = ds_vk::k_axis_y},
+        ds_vk::Obb{.center = {0.0f, 3.0f, 0.0f}, .half_extent = {0.5f, 0.5f, 0.5f}}
+    );
+    check(obb_hit.has_value() && near(obb_hit->distance, 2.5f), "ray hits obb");
+
+    const auto capsule_hit = ds_vk::hit_capsule(
+        ds_vk::Ray{.origin = {-2.0f, 0.0f, 0.0f}, .direction = ds_vk::k_axis_x},
+        ds_vk::Capsule{.a = -ds_vk::k_axis_z, .b = ds_vk::k_axis_z, .radius = 0.25f}
+    );
+    check(capsule_hit.has_value(), "ray hits capsule");
 
     auto camera = ds_vk::Camera{};
     camera.configure({
@@ -275,14 +275,14 @@ auto test_selection_helpers() -> void
         .yaw = 0.0f,
         .pitch = 0.0f,
     });
-    const auto center_ray = ds_vk::make_pick_ray(camera, {400.0f, 300.0f}, {800.0f, 600.0f});
+    const auto center_ray = ds_vk::make_camera_ray(camera, {400.0f, 300.0f}, {800.0f, 600.0f});
     check(finite_vec3(center_ray.origin), "pick ray origin is finite");
     check(finite_vec3(center_ray.direction), "pick ray direction is finite");
     check(near(glm::length(center_ray.direction), 1.0f, 1.0e-4f), "pick ray direction is unit");
-    const auto upper_ray = ds_vk::make_pick_ray(camera, {400.0f, 200.0f}, {800.0f, 600.0f});
-    const auto lower_ray = ds_vk::make_pick_ray(camera, {400.0f, 400.0f}, {800.0f, 600.0f});
-    const auto left_ray = ds_vk::make_pick_ray(camera, {300.0f, 300.0f}, {800.0f, 600.0f});
-    const auto right_ray = ds_vk::make_pick_ray(camera, {500.0f, 300.0f}, {800.0f, 600.0f});
+    const auto upper_ray = ds_vk::make_camera_ray(camera, {400.0f, 200.0f}, {800.0f, 600.0f});
+    const auto lower_ray = ds_vk::make_camera_ray(camera, {400.0f, 400.0f}, {800.0f, 600.0f});
+    const auto left_ray = ds_vk::make_camera_ray(camera, {300.0f, 300.0f}, {800.0f, 600.0f});
+    const auto right_ray = ds_vk::make_camera_ray(camera, {500.0f, 300.0f}, {800.0f, 600.0f});
     check(upper_ray.direction.z > 0.0f, "pick ray maps upper screen pixels toward world up");
     check(lower_ray.direction.z < 0.0f, "pick ray maps lower screen pixels toward world down");
     check(left_ray.direction.y < 0.0f, "pick ray maps left screen pixels to camera left");
@@ -296,17 +296,15 @@ auto test_picker_plugin() -> void
     const auto aabb_id = ds_vk::ObjectId{.value = 12u};
     static_cast<void>(picker.add_sphere({
         .object_id = sphere_id,
-        .center = {3.0f, 0.0f, 0.0f},
-        .radius = 1.0f,
+        .sphere = {.center = {3.0f, 0.0f, 0.0f}, .radius = 1.0f},
     }));
     static_cast<void>(picker.add_aabb({
         .object_id = aabb_id,
-        .min = {5.0f, -1.0f, -1.0f},
-        .max = {6.0f, 1.0f, 1.0f},
+        .aabb = {.min = {5.0f, -1.0f, -1.0f}, .max = {6.0f, 1.0f, 1.0f}},
     }));
-    const auto ray = ds_vk::PickRay{
+    const auto ray = ds_vk::Ray{
         .origin = {0.0f, 0.0f, 0.0f},
-        .direction = {1.0f, 0.0f, 0.0f},
+        .direction = ds_vk::k_axis_x,
     };
     const auto first_hit = picker.raycast(ray);
     check(first_hit.has_value(), "picker raycast returns nearest hit");
@@ -319,41 +317,37 @@ auto test_picker_plugin() -> void
     picker.clear();
     static_cast<void>(picker.add_sphere({
         .object_id = {.value = 20u},
-        .layer = 1u << 2u,
-        .center = {2.0f, 0.0f, 0.0f},
-        .radius = 0.5f,
+        .layer = ds_vk::Layer{1u << 2u},
+        .sphere = {.center = {2.0f, 0.0f, 0.0f}, .radius = 0.5f},
     }));
     check(
-        !picker.raycast({.ray = ray, .layer_mask = 1u << 1u}).has_value(),
+        !picker.raycast({.ray = ray, .layer_mask = ds_vk::LayerMask{1u << 1u}}).has_value(),
         "picker raycast respects layer mask misses"
     );
     check(
-        picker.raycast({.ray = ray, .layer_mask = 1u << 2u}).has_value(),
+        picker.raycast({.ray = ray, .layer_mask = ds_vk::LayerMask{1u << 2u}}).has_value(),
         "picker raycast respects layer mask hits"
     );
 
     picker.clear();
     static_cast<void>(picker.add_obb({
         .object_id = {.value = 30u},
-        .center = {0.0f, 3.0f, 0.0f},
-        .half_extent = {0.5f, 0.5f, 0.5f},
+        .obb = {.center = {0.0f, 3.0f, 0.0f}, .half_extent = {0.5f, 0.5f, 0.5f}},
     }));
     const auto obb_hit = picker.raycast({
         .origin = {0.0f, 0.0f, 0.0f},
-        .direction = {0.0f, 1.0f, 0.0f},
+        .direction = ds_vk::k_axis_y,
     });
     check(obb_hit.has_value() && obb_hit->object_id.value == 30u, "picker supports obb targets");
 
     picker.clear();
     static_cast<void>(picker.add_capsule({
         .object_id = {.value = 40u},
-        .a = {0.0f, 0.0f, -1.0f},
-        .b = {0.0f, 0.0f, 1.0f},
-        .radius = 0.25f,
+        .capsule = {.a = -ds_vk::k_axis_z, .b = ds_vk::k_axis_z, .radius = 0.25f},
     }));
     const auto capsule_hit = picker.raycast({
         .origin = {-2.0f, 0.0f, 0.0f},
-        .direction = {1.0f, 0.0f, 0.0f},
+        .direction = ds_vk::k_axis_x,
     });
     check(
         capsule_hit.has_value() && capsule_hit->object_id.value == 40u,
@@ -370,8 +364,7 @@ auto test_picker_plugin() -> void
     picker.clear();
     static_cast<void>(picker.add_sphere({
         .object_id = {.value = 50u},
-        .center = {0.0f, 0.0f, 0.0f},
-        .radius = 1.0f,
+        .sphere = {.center = {0.0f, 0.0f, 0.0f}, .radius = 1.0f},
     }));
     const auto click_hit = picker.click({
         .camera = camera,
@@ -385,8 +378,7 @@ auto test_picker_plugin() -> void
     picker.clear();
     static_cast<void>(picker.add_screen_segment({
         .object_id = {.value = 60u},
-        .start = {0.0f, -0.5f, 0.0f},
-        .end = {0.0f, 0.5f, 0.0f},
+        .segment = {.start = {0.0f, -0.5f, 0.0f}, .end = {0.0f, 0.5f, 0.0f}},
         .radius_px = 12.0f,
     }));
     const auto segment_hit = picker.click({
@@ -407,8 +399,7 @@ auto test_picker_plugin() -> void
     picker.clear();
     static_cast<void>(picker.add_screen_segment({
         .object_id = {.value = 61u},
-        .start = {0.0f, -0.2f, 1.0f},
-        .end = {0.0f, 0.2f, 1.0f},
+        .segment = {.start = {0.0f, -0.2f, 1.0f}, .end = {0.0f, 0.2f, 1.0f}},
         .radius_px = 8.0f,
     }));
     const auto above_segment_hit = picker.click({
@@ -478,6 +469,25 @@ auto test_viz_plugin() -> void
         }
     );
     check(cross_lines == 2u, "viz cross marker draws two lines");
+
+    auto trail_draw = FakeDrawSink{};
+    const auto trail_points = std::array{
+        ds_vk::Vec3{0.0f, 0.0f, 0.0f},
+        ds_vk::k_axis_x,
+        ds_vk::k_axis_x + ds_vk::k_axis_y,
+    };
+    const auto trail_segments = ds_vk::viz::draw_trail(
+        trail_draw,
+        ds_vk::viz::TrailConfig{
+            .points = std::span<const ds_vk::Vec3>{trail_points},
+            .color = ds_vk::Color{1.0f, 0.7f, 0.2f, 1.0f},
+            .tail_alpha = 0.25f,
+            .head_alpha = 0.85f,
+        }
+    );
+    check(trail_segments == 2u && trail_draw.line_count == 2u, "viz trail draws line segments");
+    check(near(trail_draw.first_line_color.a(), 0.25f), "viz trail applies tail alpha");
+    check(near(trail_draw.last_line_color.a(), 0.85f), "viz trail applies head alpha");
 }
 }  // namespace
 
@@ -489,7 +499,7 @@ auto main() -> int
     test_sphere_mesh();
     test_camera_projection();
     test_camera_config();
-    test_selection_helpers();
+    test_geometry_helpers();
     test_picker_plugin();
     test_viz_plugin();
     if (g_failures != 0)

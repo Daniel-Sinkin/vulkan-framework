@@ -23,8 +23,6 @@
 #include <utility>
 #include <vector>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 #include <stb_image_write.h>
 
@@ -136,7 +134,7 @@ struct DebugPushConstants
 {
     Mat4 view_projection{1.0f};
     Vec4 camera_position{0.0f, 0.0f, 0.0f, 1.0f};
-    Vec4 camera_right{1.0f, 0.0f, 0.0f, 0.0f};
+    Vec4 camera_right{k_axis_x, 0.0f};
 };
 
 // clang-format off
@@ -272,8 +270,20 @@ auto to_gpu_material(
 
 [[nodiscard]] auto shadow_supported_by_light(const LightConfig& light) noexcept -> bool
 {
-    return light.shadow.enabled
-           && (light.type == LightType::directional || light.type == LightType::spot);
+    if (!light.shadow.enabled)
+    {
+        return false;
+    }
+
+    switch (light.type)
+    {
+        case LightType::directional:
+        case LightType::spot:
+            return true;
+        case LightType::radial:
+            return false;
+    }
+    return false;
 }
 
 [[nodiscard]] auto shadow_light_index(const std::vector<LightConfig>& lights) noexcept -> u32
@@ -298,41 +308,61 @@ auto to_gpu_material(
 [[nodiscard]] auto light_projection_matrix(const LightConfig& light, const Camera& camera) noexcept
     -> Mat4
 {
-    if (light.type == LightType::spot)
+    switch (light.type)
     {
-        const auto outer =
-            std::clamp(light.outer_cone_angle, glm::radians(1.0f), std::numbers::pi_v<f32> * 0.49f);
-        const auto far_plane = light.shadow.far_plane > light.shadow.near_plane
-                                   ? light.shadow.far_plane
-                                   : std::max(light.shadow.near_plane + 0.1f, light.range);
-        auto projection = glm::perspective(2.0f * outer, 1.0f, light.shadow.near_plane, far_plane);
-        projection[1][1] *= -1.0f;
-        return projection;
+        case LightType::spot:
+            {
+                const auto outer = std::clamp(
+                    light.outer_cone_angle, glm::radians(1.0f), std::numbers::pi_v<f32> * 0.49f
+                );
+                const auto far_plane = light.shadow.far_plane > light.shadow.near_plane
+                                           ? light.shadow.far_plane
+                                           : std::max(light.shadow.near_plane + 0.1f, light.range);
+                auto projection =
+                    glm::perspective(2.0f * outer, 1.0f, light.shadow.near_plane, far_plane);
+                projection[1][1] *= -1.0f;
+                return projection;
+            }
+        case LightType::directional:
+        case LightType::radial:
+            {
+                const auto extent = std::max(0.1f, light.shadow.ortho_extent);
+                auto projection = glm::orthoRH_ZO(
+                    -extent,
+                    extent,
+                    -extent,
+                    extent,
+                    light.shadow.near_plane,
+                    light.shadow.far_plane
+                );
+                projection[1][1] *= -1.0f;
+                static_cast<void>(camera);
+                return projection;
+            }
     }
-
-    const auto extent = std::max(0.1f, light.shadow.ortho_extent);
-    auto projection = glm::orthoRH_ZO(
-        -extent, extent, -extent, extent, light.shadow.near_plane, light.shadow.far_plane
-    );
-    projection[1][1] *= -1.0f;
-    static_cast<void>(camera);
-    return projection;
+    return Mat4{1.0f};
 }
 
 [[nodiscard]] auto
 light_view_projection_matrix(const LightConfig& light, const Camera& camera) noexcept -> Mat4
 {
-    if (light.type == LightType::spot)
+    switch (light.type)
     {
-        return light_projection_matrix(light, camera)
-               * light_view_matrix(light.position, light.direction);
+        case LightType::spot:
+            return light_projection_matrix(light, camera)
+                   * light_view_matrix(light.position, light.direction);
+        case LightType::directional:
+        case LightType::radial:
+            {
+                const auto direction = normalize_or(light.direction, -k_axis_z);
+                const auto depth = std::max(light.shadow.far_plane - light.shadow.near_plane, 1.0f);
+                const auto target = camera.pivot();
+                const auto position = target - direction * (0.5f * depth);
+                return light_projection_matrix(light, camera)
+                       * light_view_matrix(position, direction);
+            }
     }
-
-    const auto direction = normalize_or(light.direction, -k_axis_z);
-    const auto depth = std::max(light.shadow.far_plane - light.shadow.near_plane, 1.0f);
-    const auto target = camera.pivot();
-    const auto position = target - direction * (0.5f * depth);
-    return light_projection_matrix(light, camera) * light_view_matrix(position, direction);
+    return Mat4{1.0f};
 }
 
 [[nodiscard]] auto build_gpu_lighting(
@@ -1434,6 +1464,35 @@ auto Runtime::Impl::create_shadow_map() -> void
     check_vk_result(vkCreateFramebuffer(
         device, &framebuffer_info, allocation_callbacks, &shadow_map.framebuffer
     ));
+
+    const auto command_buffer = begin_immediate_commands();
+    VkImageMemoryBarrier shader_read_barrier{};
+    shader_read_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    shader_read_barrier.srcAccessMask = 0;
+    shader_read_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    shader_read_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    shader_read_barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    shader_read_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    shader_read_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    shader_read_barrier.image = shadow_map.image;
+    shader_read_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    shader_read_barrier.subresourceRange.baseMipLevel = 0;
+    shader_read_barrier.subresourceRange.levelCount = 1;
+    shader_read_barrier.subresourceRange.baseArrayLayer = 0;
+    shader_read_barrier.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(
+        command_buffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &shader_read_barrier
+    );
+    end_immediate_commands(command_buffer);
 }
 
 auto Runtime::Impl::destroy_shadow_map() noexcept -> void

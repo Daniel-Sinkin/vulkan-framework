@@ -172,7 +172,7 @@ auto test_draw_list() -> void
     });
     draw.spot_light({
         .position = {0.0f, 0.0f, 3.0f},
-        .direction = {0.0f, 0.0f, -1.0f},
+        .direction = -ds_vk::k_axis_z,
         .intensity = 20.0f,
         .range = 6.0f,
         .inner_cone_angle = 0.2f,
@@ -188,12 +188,12 @@ auto test_draw_list() -> void
 
     draw.debug_line({
         .start = {0.0f, 0.0f, 0.0f},
-        .end = {1.0f, 0.0f, 0.0f},
+        .end = ds_vk::k_axis_x,
         .color = ds_vk::Color::white,
     });
     draw.debug_arrow({
         .origin = {0.0f, 0.0f, 0.0f},
-        .vector = {0.0f, 1.0f, 0.0f},
+        .vector = ds_vk::k_axis_y,
         .color = ds_vk::Color::white,
     });
     check(draw.debug_segments().size() == 2u, "debug line and arrow are recorded");

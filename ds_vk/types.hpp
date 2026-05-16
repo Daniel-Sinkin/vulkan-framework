@@ -80,16 +80,18 @@ struct Color
     static const Color gray;
 };
 
-inline constexpr Color Color::black{0.0f, 0.0f, 0.0f, 1.0f};
-inline constexpr Color Color::white{1.0f, 1.0f, 1.0f, 1.0f};
-inline constexpr Color Color::red{1.0f, 0.0f, 0.0f, 1.0f};
-inline constexpr Color Color::green{0.0f, 1.0f, 0.0f, 1.0f};
-inline constexpr Color Color::blue{0.0f, 0.0f, 1.0f, 1.0f};
-inline constexpr Color Color::yellow{1.0f, 1.0f, 0.0f, 1.0f};
-inline constexpr Color Color::cyan{0.0f, 1.0f, 1.0f, 1.0f};
+// clang-format off
+inline constexpr Color Color::black  {0.0f, 0.0f, 0.0f, 1.0f};
+inline constexpr Color Color::white  {1.0f, 1.0f, 1.0f, 1.0f};
+inline constexpr Color Color::red    {1.0f, 0.0f, 0.0f, 1.0f};
+inline constexpr Color Color::green  {0.0f, 1.0f, 0.0f, 1.0f};
+inline constexpr Color Color::blue   {0.0f, 0.0f, 1.0f, 1.0f};
+inline constexpr Color Color::yellow {1.0f, 1.0f, 0.0f, 1.0f};
+inline constexpr Color Color::cyan   {0.0f, 1.0f, 1.0f, 1.0f};
 inline constexpr Color Color::magenta{1.0f, 0.0f, 1.0f, 1.0f};
-inline constexpr Color Color::orange{1.0f, 0.5f, 0.0f, 1.0f};
-inline constexpr Color Color::gray{0.5f, 0.5f, 0.5f, 1.0f};
+inline constexpr Color Color::orange {1.0f, 0.5f, 0.0f, 1.0f};
+inline constexpr Color Color::gray   {0.5f, 0.5f, 0.5f, 1.0f};
+// clang-format on
 
 struct ColorU8
 {

@@ -25,6 +25,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(DS_VK_BUILD_APP "Build ds_vk app users" ON)
 option(DS_VK_BUILD_TESTS "Build ds_vk tests" ON)
 option(DS_VK_USE_SYSTEM_VULKAN "Build Vulkan runtime if Vulkan is discoverable" ON)
+option(DS_VK_ENABLE_PCH "Build Vulkan runtime targets with precompiled headers" ON)
 
 add_library(ds_vk_warnings INTERFACE)
 target_compile_options(ds_vk_warnings INTERFACE
@@ -55,8 +56,8 @@ add_subdirectory(external/glm EXCLUDE_FROM_ALL)
 
 set(DS_VK_CORE_SOURCES
   ds_vk/camera.cpp
+  ds_vk/geometry.cpp
   ds_vk/mesh.cpp
-  ds_vk/selection.cpp
 )
 
 add_library(ds_vk_core STATIC ${DS_VK_CORE_SOURCES})
@@ -96,6 +97,14 @@ if(DS_VK_USE_SYSTEM_VULKAN)
 endif()
 
 if(DS_VK_BUILD_APP AND Vulkan_FOUND)
+  function(ds_vk_enable_pch target_name)
+    if(DS_VK_ENABLE_PCH)
+      target_precompile_headers(${target_name} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/ds_vk/pch.hpp
+      )
+    endif()
+  endfunction()
+
   find_program(DS_VK_GLSLC_EXECUTABLE glslc HINTS "$ENV{VULKAN_SDK}/bin")
   if(NOT DS_VK_GLSLC_EXECUTABLE)
     message(FATAL_ERROR "Vulkan was found, but glslc was not. Set VULKAN_SDK or install Vulkan shader tools.")
@@ -152,6 +161,13 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
 
   add_library(ds_vk STATIC
     ds_vk/runtime.cpp
+    ds_vk/stb_image_impl.cpp
+    ds_vk/stb_image_write_impl.cpp
+  )
+  set_source_files_properties(
+    ds_vk/stb_image_impl.cpp
+    ds_vk/stb_image_write_impl.cpp
+    PROPERTIES SKIP_PRECOMPILE_HEADERS ON
   )
   add_dependencies(ds_vk ds_vk_shaders)
   target_include_directories(ds_vk PUBLIC
@@ -171,16 +187,23 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     Vulkan::Vulkan
   )
   target_link_libraries(ds_vk PRIVATE ds_vk_warnings)
+  ds_vk_enable_pch(ds_vk)
 
   add_executable(ds_vk_basic_app app/main.cpp)
   target_compile_definitions(ds_vk_basic_app PRIVATE
     DS_VK_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
   )
   target_link_libraries(ds_vk_basic_app PRIVATE ds_vk ds_vk_picker ds_vk_viz ds_vk_warnings)
+  ds_vk_enable_pch(ds_vk_basic_app)
+
+  add_executable(ds_vk_vectorfield_app app/vectorfield_main.cpp)
+  target_link_libraries(ds_vk_vectorfield_app PRIVATE ds_vk ds_vk_picker ds_vk_viz ds_vk_warnings)
+  ds_vk_enable_pch(ds_vk_vectorfield_app)
 
   if(DS_VK_BUILD_TESTS)
     add_executable(ds_vk_runtime_tests tests/test_runtime.cpp)
     target_link_libraries(ds_vk_runtime_tests PRIVATE ds_vk ds_vk_warnings)
+    ds_vk_enable_pch(ds_vk_runtime_tests)
     add_test(NAME ds_vk_runtime_tests COMMAND ds_vk_runtime_tests)
   endif()
 else()

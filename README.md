@@ -18,8 +18,11 @@ The app target is `ds_vk_basic_app` when Vulkan and `glslc` are available.
 
 ```sh
 ./run.sh
+./run.sh --app vectorfield
 ./run.sh --smoke-frames 20 --screenshot run/basic.png --hide-ui
+./run.sh --app vectorfield --smoke-frames 20 --screenshot run/vectorfield.png --hide-ui
 ./build/ds_vk_basic_app
+./build/ds_vk_vectorfield_app
 ./build/ds_vk_basic_app --smoke-frames 20 --screenshot run/basic.png --hide-ui
 python3 scripts/validate_screenshot.py run/basic.png
 ```
@@ -34,7 +37,7 @@ python3 -m venv .venv
 
 ## Current App
 
-The first full user lives in `app/`, not `examples/`. It shows:
+The first full user lives in `app/`, not `examples/`. `ds_vk_basic_app` shows:
 
 - z-up orbit camera with pivot pan and wheel zoom
 - ImGui camera controls
@@ -43,6 +46,11 @@ The first full user lives in `app/`, not `examples/`. It shows:
 - generated smooth UV sphere with adjustable slices/stacks
 - debug line/arrow/sphere grid and axes
 - swapchain screenshot capture
+
+`ds_vk_vectorfield_app` is the first migrated-style standalone user. It owns its
+own vectorfield examples, time controls, trace seeds, and selection state while
+using `ds_vk::viz` trails/vector arrows and `ds_vk::Picker` screen-segment
+picking.
 
 Research and design notes live in `docs/`.
 

@@ -24,115 +24,30 @@ auto Camera::configure(const CameraConfig& config) noexcept -> Camera&
     return *this;
 }
 
-auto Camera::pivot() noexcept -> Vec3&
-{
-    return pivot_;
-}
-
-auto Camera::pivot() const noexcept -> const Vec3&
-{
-    return pivot_;
-}
-
-auto Camera::distance() noexcept -> f32&
-{
-    return distance_;
-}
-
-auto Camera::distance() const noexcept -> f32
-{
-    return distance_;
-}
-
-auto Camera::yaw() noexcept -> f32&
-{
-    return yaw_;
-}
-
-auto Camera::yaw() const noexcept -> f32
-{
-    return yaw_;
-}
-
-auto Camera::pitch() noexcept -> f32&
-{
-    return pitch_;
-}
-
-auto Camera::pitch() const noexcept -> f32
-{
-    return pitch_;
-}
-
-auto Camera::fov_y() noexcept -> f32&
-{
-    return fov_y_;
-}
-
-auto Camera::fov_y() const noexcept -> f32
-{
-    return fov_y_;
-}
-
-auto Camera::orbit_sensitivity() noexcept -> f32&
-{
-    return orbit_sensitivity_;
-}
-
-auto Camera::orbit_sensitivity() const noexcept -> f32
-{
-    return orbit_sensitivity_;
-}
-
-auto Camera::pivot_sensitivity() noexcept -> f32&
-{
-    return pivot_sensitivity_;
-}
-
-auto Camera::pivot_sensitivity() const noexcept -> f32
-{
-    return pivot_sensitivity_;
-}
-
-auto Camera::zoom_sensitivity() noexcept -> f32&
-{
-    return zoom_sensitivity_;
-}
-
-auto Camera::zoom_sensitivity() const noexcept -> f32
-{
-    return zoom_sensitivity_;
-}
-
-auto Camera::z_near() noexcept -> f32&
-{
-    return z_near_;
-}
-
-auto Camera::z_near() const noexcept -> f32
-{
-    return z_near_;
-}
-
-auto Camera::z_far() noexcept -> f32&
-{
-    return z_far_;
-}
-
-auto Camera::z_far() const noexcept -> f32
-{
-    return z_far_;
-}
-
-auto Camera::projection_mode() noexcept -> ProjectionMode&
-{
-    return projection_mode_;
-}
-
-auto Camera::projection_mode() const noexcept -> ProjectionMode
-{
-    return projection_mode_;
-}
+// clang-format off
+auto Camera::pivot() noexcept                   -> Vec3&           { return pivot_; }
+auto Camera::pivot() const noexcept             -> const Vec3&     { return pivot_; }
+auto Camera::distance() noexcept                -> f32&            { return distance_; }
+auto Camera::distance() const noexcept          -> f32             { return distance_; }
+auto Camera::yaw() noexcept                     -> f32&            { return yaw_; }
+auto Camera::yaw() const noexcept               -> f32             { return yaw_; }
+auto Camera::pitch() noexcept                   -> f32&            { return pitch_; }
+auto Camera::pitch() const noexcept             -> f32             { return pitch_; }
+auto Camera::fov_y() noexcept                   -> f32&            { return fov_y_; }
+auto Camera::fov_y() const noexcept             -> f32             { return fov_y_; }
+auto Camera::orbit_sensitivity() noexcept       -> f32&            { return orbit_sensitivity_; }
+auto Camera::orbit_sensitivity() const noexcept -> f32             { return orbit_sensitivity_; }
+auto Camera::pivot_sensitivity() noexcept       -> f32&            { return pivot_sensitivity_; }
+auto Camera::pivot_sensitivity() const noexcept -> f32             { return pivot_sensitivity_; }
+auto Camera::zoom_sensitivity() noexcept        -> f32&            { return zoom_sensitivity_; }
+auto Camera::zoom_sensitivity() const noexcept  -> f32             { return zoom_sensitivity_; }
+auto Camera::z_near() noexcept                  -> f32&            { return z_near_; }
+auto Camera::z_near() const noexcept            -> f32             { return z_near_; }
+auto Camera::z_far() noexcept                   -> f32&            { return z_far_; }
+auto Camera::z_far() const noexcept             -> f32             { return z_far_; }
+auto Camera::projection_mode() noexcept         -> ProjectionMode& { return projection_mode_; }
+auto Camera::projection_mode() const noexcept   -> ProjectionMode  { return projection_mode_; }
+// clang-format on
 
 auto Camera::position() const noexcept -> Vec3
 {
@@ -153,19 +68,26 @@ auto Camera::view_matrix() const noexcept -> Mat4
 auto Camera::projection_matrix(f32 aspect) const noexcept -> Mat4
 {
     const auto clamped_aspect = std::max(0.01f, aspect);
-    if (projection_mode_ == ProjectionMode::orthographic)
+    switch (projection_mode_)
     {
-        const auto half_height = 0.5f * view_height();
-        const auto half_width = half_height * clamped_aspect;
-        auto proj =
-            glm::orthoRH_ZO(-half_width, half_width, -half_height, half_height, z_near_, z_far_);
-        proj[1][1] *= -1.0f;
-        return proj;
+        case ProjectionMode::orthographic:
+            {
+                const auto half_height = 0.5f * view_height();
+                const auto half_width = half_height * clamped_aspect;
+                auto proj = glm::orthoRH_ZO(
+                    -half_width, half_width, -half_height, half_height, z_near_, z_far_
+                );
+                proj[1][1] *= -1.0f;
+                return proj;
+            }
+        case ProjectionMode::perspective:
+            {
+                auto proj = glm::perspective(fov_y_, clamped_aspect, z_near_, z_far_);
+                proj[1][1] *= -1.0f;
+                return proj;
+            }
     }
-
-    auto proj = glm::perspective(fov_y_, clamped_aspect, z_near_, z_far_);
-    proj[1][1] *= -1.0f;
-    return proj;
+    return Mat4{1.0f};
 }
 
 auto Camera::view_projection_matrix(f32 aspect) const noexcept -> Mat4
