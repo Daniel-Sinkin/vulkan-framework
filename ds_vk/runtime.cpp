@@ -22,6 +22,7 @@
 #include <iostream>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <stb_image.h>
 #include <stb_image_write.h>
 #include <stdexcept>
@@ -886,11 +887,25 @@ struct Runtime::Impl
     DrawList draw_list{};
     InputState input{};
     std::filesystem::path pending_screenshot;
+    std::optional<FrameContext> active_frame;
+    const ImGui_ImplVulkanH_Frame* active_window_frame{};
+    SwapchainCapture active_capture{};
+    std::chrono::steady_clock::time_point previous_frame_time{};
+    std::chrono::steady_clock::time_point frame_begin_cpu{};
+    std::chrono::steady_clock::time_point frame_update_begin_cpu{};
+    std::chrono::steady_clock::time_point frame_update_end_cpu{};
+    std::chrono::steady_clock::time_point frame_ui_end_cpu{};
+    std::chrono::steady_clock::time_point render_begin_cpu{};
     bool pending_screenshot_transparent{};
     bool imgui_ready{};
     bool sdl_ready{};
+    bool initialized{};
+    bool done{};
+    bool orbiting{};
+    bool panning{};
+    bool main_pass_active{};
+    bool imgui_rendered{};
 
-    auto run(const detail::RuntimeCallbacks& callbacks, Runtime& runtime) -> int;
     auto initialize() -> void;
     auto shutdown() noexcept -> void;
     auto setup_sdl() -> void;
@@ -959,9 +974,17 @@ struct Runtime::Impl
     auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
     auto replace_mesh(MeshHandle handle, const PositionNormalMeshData& mesh) -> MeshHandle;
     auto replace_mesh(MeshHandle handle, const QuantizedPositionNormalMeshData& mesh) -> MeshHandle;
-    auto render_frame(
-        VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index, ImDrawData* draw_data
-    ) -> void;
+    [[nodiscard]] auto begin_frame() -> FrameContext*;
+    [[nodiscard]] auto frame() -> FrameContext&;
+    [[nodiscard]] auto frame() const -> const FrameContext&;
+    auto render_shadow_pass() -> void;
+    auto begin_main_pass() -> void;
+    auto render_draw_list() -> void;
+    auto render_imgui() -> void;
+    auto end_main_pass() -> void;
+    auto end_frame() -> void;
+    auto finish_imgui_without_rendering() -> void;
+    auto set_main_pass_viewport(VkCommandBuffer command_buffer, VkExtent2D extent) -> void;
     auto draw_shadow_map(VkCommandBuffer command_buffer) -> void;
     auto draw_environment(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index)
         -> void;
@@ -976,7 +999,7 @@ struct Runtime::Impl
     ) -> void;
     auto draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index) -> void;
     auto draw_runtime_ui() -> void;
-    auto handle_event(const SDL_Event& event, bool& done, bool& orbiting, bool& panning) -> void;
+    auto handle_event(const SDL_Event& event) -> void;
     [[nodiscard]] auto framebuffer_mouse_position(f32 window_x, f32 window_y) const -> Vec2;
     [[nodiscard]] auto current_modifiers() const noexcept -> KeyboardModifiers;
     auto reset_input_frame() -> void;
@@ -3713,8 +3736,8 @@ auto Runtime::Impl::draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent
     );
 }
 
-auto Runtime::Impl::render_frame(
-    VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index, ImDrawData* draw_data
+auto Runtime::Impl::set_main_pass_viewport(
+    const VkCommandBuffer command_buffer, const VkExtent2D extent
 ) -> void
 {
     const VkViewport viewport{
@@ -3728,15 +3751,31 @@ auto Runtime::Impl::render_frame(
     const VkRect2D scissor{.offset = VkOffset2D{.x = 0, .y = 0}, .extent = extent};
     vkCmdSetViewport(command_buffer, 0, 1, &viewport);
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+}
 
-    draw_meshes(command_buffer, extent, frame_index);
-    draw_environment(command_buffer, extent, frame_index);
-    draw_debug(command_buffer, extent, frame_index);
-
-    if (draw_data)
+auto Runtime::Impl::render_draw_list() -> void
+{
+    auto& current_frame = frame();
+    if (!main_pass_active)
     {
-        ImGui_ImplVulkan_RenderDrawData(draw_data, command_buffer);
+        throw std::runtime_error("render_draw_list requires an active main render pass");
     }
+    set_main_pass_viewport(current_frame.command_buffer, current_frame.extent);
+    draw_meshes(
+        current_frame.command_buffer,
+        current_frame.extent,
+        static_cast<usize>(current_frame.swapchain_image_index)
+    );
+    draw_environment(
+        current_frame.command_buffer,
+        current_frame.extent,
+        static_cast<usize>(current_frame.swapchain_image_index)
+    );
+    draw_debug(
+        current_frame.command_buffer,
+        current_frame.extent,
+        static_cast<usize>(current_frame.swapchain_image_index)
+    );
 }
 
 auto Runtime::Impl::draw_runtime_ui() -> void
@@ -3793,8 +3832,7 @@ auto Runtime::Impl::draw_runtime_ui() -> void
     ImGui::End();
 }
 
-auto Runtime::Impl::handle_event(const SDL_Event& event, bool& done, bool& orbiting, bool& panning)
-    -> void
+auto Runtime::Impl::handle_event(const SDL_Event& event) -> void
 {
     auto& io = ImGui::GetIO();
     ImGui_ImplSDL3_ProcessEvent(&event);
@@ -4178,6 +4216,10 @@ auto Runtime::Impl::present_frame() -> void
 
 auto Runtime::Impl::initialize() -> void
 {
+    if (initialized)
+    {
+        return;
+    }
     setup_sdl();
 
     auto sdl_extension_count = 0u;
@@ -4209,10 +4251,29 @@ auto Runtime::Impl::initialize() -> void
     setup_imgui();
     create_pipelines();
     SDL_ShowWindow(window);
+    frame_counter = 0u;
+    elapsed_seconds = 0.0f;
+    done = false;
+    orbiting = false;
+    panning = false;
+    pending_screenshot = config.screenshot_path;
+    pending_screenshot_transparent = config.transparent_screenshot;
+    previous_frame_time = std::chrono::steady_clock::now();
+    initialized = true;
 }
 
 auto Runtime::Impl::shutdown() noexcept -> void
 {
+    active_frame.reset();
+    active_window_frame = nullptr;
+    if (active_capture.buffer != VK_NULL_HANDLE)
+    {
+        destroy_capture_buffer(active_capture);
+    }
+    active_capture = {};
+    main_pass_active = false;
+    imgui_rendered = false;
+
     if (device != VK_NULL_HANDLE)
     {
         (void) vkDeviceWaitIdle(device);
@@ -4325,50 +4386,56 @@ auto Runtime::Impl::shutdown() noexcept -> void
         SDL_Quit();
         sdl_ready = false;
     }
+    initialized = false;
 }
 
-auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runtime) -> int
+auto Runtime::Impl::begin_frame() -> FrameContext*
 {
-    initialize();
-    callbacks.setup(callbacks.user, runtime);
-
-    auto done = false;
-    auto orbiting = false;
-    auto panning = false;
-    frame_counter = 0u;
-    auto previous = std::chrono::steady_clock::now();
-    pending_screenshot = config.screenshot_path;
-    pending_screenshot_transparent = config.transparent_screenshot;
+    if (!initialized)
+    {
+        initialize();
+    }
+    if (done)
+    {
+        return nullptr;
+    }
+    if (active_frame.has_value())
+    {
+        throw std::runtime_error("begin_frame called while a frame is already active");
+    }
 
     while (!done)
     {
-        const auto frame_begin_cpu = std::chrono::steady_clock::now();
-        const auto now = frame_begin_cpu;
-        const auto dt_seconds = std::chrono::duration<f32>(now - previous).count();
-        previous = now;
+        frame_begin_cpu = std::chrono::steady_clock::now();
+        frame_update_begin_cpu = frame_begin_cpu;
+        frame_update_end_cpu = frame_begin_cpu;
+        frame_ui_end_cpu = frame_begin_cpu;
+        render_begin_cpu = frame_begin_cpu;
+        const auto dt_seconds =
+            std::chrono::duration<f32>(frame_begin_cpu - previous_frame_time).count();
+        previous_frame_time = frame_begin_cpu;
         elapsed_seconds += dt_seconds;
         reset_input_frame();
 
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
-            handle_event(event, done, orbiting, panning);
+            handle_event(event);
         }
         rebuild_swapchain_if_needed();
         if (done)
         {
-            break;
+            return nullptr;
         }
 
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
+        imgui_rendered = false;
 
         const auto semaphore_index = static_cast<int>(window_data.SemaphoreIndex);
         const auto image_acquired =
             window_data.FrameSemaphores[semaphore_index].ImageAcquiredSemaphore;
-        const auto render_complete =
-            window_data.FrameSemaphores[semaphore_index].RenderCompleteSemaphore;
         const auto acquire_result = vkAcquireNextImageKHR(
             device,
             window_data.Swapchain,
@@ -4392,147 +4459,251 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
             check_vk_result(acquire_result);
         }
 
-        const auto* frame = &window_data.Frames[static_cast<int>(window_data.FrameIndex)];
-        check_vk_result(vkWaitForFences(device, 1, &frame->Fence, VK_TRUE, UINT64_MAX));
-        check_vk_result(vkResetFences(device, 1, &frame->Fence));
-        check_vk_result(vkResetCommandPool(device, frame->CommandPool, 0));
+        active_window_frame = &window_data.Frames[static_cast<int>(window_data.FrameIndex)];
+        check_vk_result(
+            vkWaitForFences(device, 1, &active_window_frame->Fence, VK_TRUE, UINT64_MAX)
+        );
+        check_vk_result(vkResetFences(device, 1, &active_window_frame->Fence));
+        check_vk_result(vkResetCommandPool(device, active_window_frame->CommandPool, 0));
         collect_retired_meshes();
 
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check_vk_result(vkBeginCommandBuffer(frame->CommandBuffer, &begin_info));
+        check_vk_result(vkBeginCommandBuffer(active_window_frame->CommandBuffer, &begin_info));
 
         draw_list.clear();
+        main_pass_active = false;
+        active_capture = {};
         const VkExtent2D extent{
             .width = static_cast<u32>(std::max(0, window_data.Width)),
             .height = static_cast<u32>(std::max(0, window_data.Height)),
         };
-        FrameContext frame_context{
-            .instance = instance,
-            .physical_device = physical_device,
-            .device = device,
-            .graphics_queue = queue,
-            .graphics_queue_family = queue_family,
-            .command_buffer = frame->CommandBuffer,
-            .allocator = vma_allocator,
-            .extent = extent,
-            .frame_index = checked_u32(static_cast<usize>(frame_counter), "runtime frame index"),
-            .swapchain_image_index = window_data.FrameIndex,
-            .swapchain_image_count =
-                checked_u32(static_cast<usize>(window_data.ImageCount), "swapchain image count"),
-            .dt_seconds = dt_seconds,
-            .camera = camera,
-            .draw = draw_list,
-            .input = input,
-            .descriptor_indexing = descriptor_indexing,
-            .stats = stats,
-        };
-
-        const auto update_begin = std::chrono::steady_clock::now();
-        callbacks.update(callbacks.user, frame_context, dt_seconds);
-        const auto update_end = std::chrono::steady_clock::now();
-
-        if (!config.hide_ui)
-        {
-            draw_runtime_ui();
-            callbacks.draw_ui(callbacks.user, frame_context);
-        }
-        ImGui::Render();
-        const auto ui_end = std::chrono::steady_clock::now();
-
-        SwapchainCapture capture{};
-        if (!pending_screenshot.empty() and frame_counter >= 4u)
-        {
-            capture.width = extent.width;
-            capture.height = extent.height;
-            capture.format = window_data.SurfaceFormat.format;
-            capture.size = static_cast<VkDeviceSize>(capture.width)
-                           * static_cast<VkDeviceSize>(capture.height) * 4u;
-            capture.path = pending_screenshot;
-            capture.transparent_background = pending_screenshot_transparent;
-            create_capture_buffer(capture);
-        }
-
-        VkRenderPassBeginInfo render_pass_info{};
-        render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        render_pass_info.renderPass = window_data.RenderPass;
-        render_pass_info.framebuffer = frame->Framebuffer;
-        render_pass_info.renderArea.extent = extent;
-        std::array clear_values{
-            window_data.ClearValue,
-            VkClearValue{.depthStencil = {.depth = 1.0f, .stencil = 0}},
-        };
-        render_pass_info.clearValueCount = static_cast<u32>(clear_values.size());
-        render_pass_info.pClearValues = clear_values.data();
-        const auto render_begin = std::chrono::steady_clock::now();
-        draw_shadow_map(frame->CommandBuffer);
-        vkCmdBeginRenderPass(frame->CommandBuffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
-        render_frame(
-            frame->CommandBuffer,
-            extent,
-            static_cast<usize>(window_data.FrameIndex),
-            config.hide_ui ? nullptr : ImGui::GetDrawData()
+        active_frame.emplace(
+            FrameContext{
+                .instance = instance,
+                .physical_device = physical_device,
+                .device = device,
+                .graphics_queue = queue,
+                .graphics_queue_family = queue_family,
+                .command_buffer = active_window_frame->CommandBuffer,
+                .allocator = vma_allocator,
+                .extent = extent,
+                .frame_index =
+                    checked_u32(static_cast<usize>(frame_counter), "runtime frame index"),
+                .swapchain_image_index = window_data.FrameIndex,
+                .swapchain_image_count = checked_u32(
+                    static_cast<usize>(window_data.ImageCount), "swapchain image count"
+                ),
+                .dt_seconds = dt_seconds,
+                .camera = camera,
+                .draw = draw_list,
+                .input = input,
+                .descriptor_indexing = descriptor_indexing,
+                .stats = stats,
+            }
         );
-        vkCmdEndRenderPass(frame->CommandBuffer);
-        if (capture.buffer != VK_NULL_HANDLE)
-        {
-            record_capture_commands(frame->CommandBuffer, frame, capture);
-        }
+        return &*active_frame;
+    }
+    return nullptr;
+}
 
-        const VkPipelineStageFlags wait_stage{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-        VkSubmitInfo submit_info{};
-        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit_info.waitSemaphoreCount = 1;
-        submit_info.pWaitSemaphores = &image_acquired;
-        submit_info.pWaitDstStageMask = &wait_stage;
-        submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &frame->CommandBuffer;
-        submit_info.signalSemaphoreCount = 1;
-        submit_info.pSignalSemaphores = &render_complete;
+auto Runtime::Impl::frame() -> FrameContext&
+{
+    if (!active_frame.has_value())
+    {
+        throw std::runtime_error("runtime frame requested with no active frame");
+    }
+    return *active_frame;
+}
 
-        check_vk_result(vkEndCommandBuffer(frame->CommandBuffer));
-        check_vk_result(vkQueueSubmit(queue, 1, &submit_info, frame->Fence));
-        if (capture.buffer != VK_NULL_HANDLE)
-        {
-            check_vk_result(vkWaitForFences(device, 1, &frame->Fence, VK_TRUE, UINT64_MAX));
-            write_capture_png(capture);
-            destroy_capture_buffer(capture);
-            std::cout << "[screenshot] wrote " << pending_screenshot << '\n' << std::flush;
-            pending_screenshot.clear();
-            pending_screenshot_transparent = false;
-        }
-        const auto render_end = std::chrono::steady_clock::now();
+auto Runtime::Impl::frame() const -> const FrameContext&
+{
+    if (!active_frame.has_value())
+    {
+        throw std::runtime_error("runtime frame requested with no active frame");
+    }
+    return *active_frame;
+}
 
-        present_frame();
-        const auto frame_end_cpu = std::chrono::steady_clock::now();
+auto Runtime::Impl::render_shadow_pass() -> void
+{
+    const auto& current_frame = frame();
+    if (main_pass_active)
+    {
+        throw std::runtime_error("shadow pass must be recorded before the main render pass");
+    }
+    if (frame_update_end_cpu == frame_update_begin_cpu)
+    {
+        frame_update_end_cpu = std::chrono::steady_clock::now();
+        frame_ui_end_cpu = frame_update_end_cpu;
+    }
+    render_begin_cpu = std::chrono::steady_clock::now();
+    draw_shadow_map(current_frame.command_buffer);
+}
 
-        stats = RuntimeStats{
-            .last_frame_ms =
-                std::chrono::duration<f32, std::milli>(frame_end_cpu - frame_begin_cpu).count(),
-            .last_update_ms =
-                std::chrono::duration<f32, std::milli>(update_end - update_begin).count(),
-            .last_ui_ms = std::chrono::duration<f32, std::milli>(ui_end - update_end).count(),
-            .last_render_ms =
-                std::chrono::duration<f32, std::milli>(render_end - render_begin).count(),
-            .mesh_draws = static_cast<u32>(draw_list.mesh_commands().size()),
-            .mesh_batches = static_cast<u32>(mesh_batches.size()),
-            .debug_segments = static_cast<u32>(
-                draw_list.debug_segments().size() + draw_list.debug_on_top_segments().size()
-            ),
-            .lights = static_cast<u32>(draw_list.lights().size()),
-        };
-
-        ++frame_counter;
-        if (config.smoke_frames > 0u and frame_counter >= config.smoke_frames
-            and pending_screenshot.empty())
-        {
-            done = true;
-        }
+auto Runtime::Impl::begin_main_pass() -> void
+{
+    const auto& current_frame = frame();
+    if (main_pass_active)
+    {
+        throw std::runtime_error("main render pass is already active");
+    }
+    if (frame_update_end_cpu == frame_update_begin_cpu)
+    {
+        frame_update_end_cpu = std::chrono::steady_clock::now();
+        frame_ui_end_cpu = frame_update_end_cpu;
+    }
+    if (render_begin_cpu == frame_begin_cpu)
+    {
+        render_begin_cpu = std::chrono::steady_clock::now();
     }
 
-    callbacks.shutdown(callbacks.user, runtime);
-    return 0;
+    if (!pending_screenshot.empty() and frame_counter >= 4u)
+    {
+        active_capture.width = current_frame.extent.width;
+        active_capture.height = current_frame.extent.height;
+        active_capture.format = window_data.SurfaceFormat.format;
+        active_capture.size = static_cast<VkDeviceSize>(active_capture.width)
+                              * static_cast<VkDeviceSize>(active_capture.height) * 4u;
+        active_capture.path = pending_screenshot;
+        active_capture.transparent_background = pending_screenshot_transparent;
+        create_capture_buffer(active_capture);
+    }
+
+    VkRenderPassBeginInfo render_pass_info{};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    render_pass_info.renderPass = window_data.RenderPass;
+    render_pass_info.framebuffer = active_window_frame->Framebuffer;
+    render_pass_info.renderArea.extent = current_frame.extent;
+    std::array clear_values{
+        window_data.ClearValue,
+        VkClearValue{.depthStencil = {.depth = 1.0f, .stencil = 0}},
+    };
+    render_pass_info.clearValueCount = static_cast<u32>(clear_values.size());
+    render_pass_info.pClearValues = clear_values.data();
+    vkCmdBeginRenderPass(
+        current_frame.command_buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE
+    );
+    main_pass_active = true;
+}
+
+auto Runtime::Impl::render_imgui() -> void
+{
+    const auto& current_frame = frame();
+    if (!main_pass_active)
+    {
+        throw std::runtime_error("render_imgui requires an active main render pass");
+    }
+    if (imgui_rendered)
+    {
+        return;
+    }
+    ImGui::Render();
+    imgui_rendered = true;
+    frame_ui_end_cpu = std::chrono::steady_clock::now();
+    if (!config.hide_ui)
+    {
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), current_frame.command_buffer);
+    }
+}
+
+auto Runtime::Impl::end_main_pass() -> void
+{
+    const auto& current_frame = frame();
+    if (!main_pass_active)
+    {
+        throw std::runtime_error("end_main_pass called without an active main render pass");
+    }
+    vkCmdEndRenderPass(current_frame.command_buffer);
+    main_pass_active = false;
+    if (active_capture.buffer != VK_NULL_HANDLE)
+    {
+        record_capture_commands(current_frame.command_buffer, active_window_frame, active_capture);
+    }
+}
+
+auto Runtime::Impl::finish_imgui_without_rendering() -> void
+{
+    if (imgui_rendered)
+    {
+        return;
+    }
+    ImGui::EndFrame();
+    imgui_rendered = true;
+    frame_ui_end_cpu = std::chrono::steady_clock::now();
+}
+
+auto Runtime::Impl::end_frame() -> void
+{
+    auto& current_frame = frame();
+    if (main_pass_active)
+    {
+        throw std::runtime_error("end_frame called while the main render pass is active");
+    }
+    finish_imgui_without_rendering();
+
+    const auto semaphore_index = static_cast<int>(window_data.SemaphoreIndex);
+    const auto image_acquired = window_data.FrameSemaphores[semaphore_index].ImageAcquiredSemaphore;
+    const auto render_complete =
+        window_data.FrameSemaphores[semaphore_index].RenderCompleteSemaphore;
+    const VkPipelineStageFlags wait_stage{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkSubmitInfo submit_info{};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = &image_acquired;
+    submit_info.pWaitDstStageMask = &wait_stage;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &current_frame.command_buffer;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &render_complete;
+
+    check_vk_result(vkEndCommandBuffer(current_frame.command_buffer));
+    check_vk_result(vkQueueSubmit(queue, 1, &submit_info, active_window_frame->Fence));
+    if (active_capture.buffer != VK_NULL_HANDLE)
+    {
+        check_vk_result(
+            vkWaitForFences(device, 1, &active_window_frame->Fence, VK_TRUE, UINT64_MAX)
+        );
+        write_capture_png(active_capture);
+        destroy_capture_buffer(active_capture);
+        std::cout << "[screenshot] wrote " << pending_screenshot << '\n' << std::flush;
+        pending_screenshot.clear();
+        pending_screenshot_transparent = false;
+    }
+    const auto render_end_cpu = std::chrono::steady_clock::now();
+
+    present_frame();
+    const auto frame_end_cpu = std::chrono::steady_clock::now();
+
+    stats = RuntimeStats{
+        .last_frame_ms =
+            std::chrono::duration<f32, std::milli>(frame_end_cpu - frame_begin_cpu).count(),
+        .last_update_ms =
+            std::chrono::duration<f32, std::milli>(frame_update_end_cpu - frame_update_begin_cpu)
+                .count(),
+        .last_ui_ms =
+            std::chrono::duration<f32, std::milli>(frame_ui_end_cpu - frame_update_end_cpu).count(),
+        .last_render_ms =
+            std::chrono::duration<f32, std::milli>(render_end_cpu - render_begin_cpu).count(),
+        .mesh_draws = static_cast<u32>(draw_list.mesh_commands().size()),
+        .mesh_batches = static_cast<u32>(mesh_batches.size()),
+        .debug_segments = static_cast<u32>(
+            draw_list.debug_segments().size() + draw_list.debug_on_top_segments().size()
+        ),
+        .lights = static_cast<u32>(draw_list.lights().size()),
+    };
+
+    ++frame_counter;
+    if (config.smoke_frames > 0u and frame_counter >= config.smoke_frames
+        and pending_screenshot.empty())
+    {
+        done = true;
+    }
+
+    active_capture = {};
+    active_window_frame = nullptr;
+    active_frame.reset();
 }
 
 Runtime::Runtime(RuntimeConfig config) : impl_(std::make_unique<Impl>(std::move(config)))
@@ -4562,9 +4733,72 @@ auto Runtime::operator=(Runtime&& other) noexcept -> Runtime&
     return *this;
 }
 
-auto Runtime::run_callbacks(const detail::RuntimeCallbacks& callbacks) -> int
+auto Runtime::initialize() -> void
 {
-    return impl_->run(callbacks, *this);
+    impl_->initialize();
+}
+
+auto Runtime::shutdown() noexcept -> void
+{
+    impl_->shutdown();
+}
+
+auto Runtime::begin_frame() -> FrameContext*
+{
+    return impl_->begin_frame();
+}
+
+auto Runtime::frame() -> FrameContext&
+{
+    return impl_->frame();
+}
+
+auto Runtime::frame() const -> const FrameContext&
+{
+    return impl_->frame();
+}
+
+auto Runtime::draw_runtime_ui() -> void
+{
+    if (!impl_->config.hide_ui)
+    {
+        impl_->draw_runtime_ui();
+    }
+}
+
+auto Runtime::render_shadow_pass() -> void
+{
+    impl_->render_shadow_pass();
+}
+
+auto Runtime::begin_main_pass() -> void
+{
+    impl_->begin_main_pass();
+}
+
+auto Runtime::render_draw_list() -> void
+{
+    impl_->render_draw_list();
+}
+
+auto Runtime::render_imgui() -> void
+{
+    impl_->render_imgui();
+}
+
+auto Runtime::end_main_pass() -> void
+{
+    impl_->end_main_pass();
+}
+
+auto Runtime::end_frame() -> void
+{
+    impl_->end_frame();
+}
+
+auto Runtime::ui_visible() const noexcept -> bool
+{
+    return !impl_->config.hide_ui;
 }
 
 auto Runtime::upload_mesh(const MeshData& mesh) -> MeshHandle

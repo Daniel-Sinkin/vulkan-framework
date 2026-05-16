@@ -1,5 +1,6 @@
 #include "ds_vk/runtime.hpp"
 
+#include <concepts>
 #include <iostream>
 #include <limits>
 #include <string_view>
@@ -27,9 +28,16 @@ struct NoHooksApp
     auto tick() -> void;
 };
 
+template <typename App>
+concept has_prototype_runner = requires(ds_vk::Runtime& runtime, App& app) {
+    { runtime.run_prototype(app) } -> std::same_as<int>;
+};
+
 static_assert(ds_vk::detail::has_runtime_hook<PlainApp>);
 static_assert(ds_vk::detail::has_runtime_hook<SetupOnlyApp>);
 static_assert(!ds_vk::detail::has_runtime_hook<NoHooksApp>);
+static_assert(has_prototype_runner<PlainApp>);
+static_assert(has_prototype_runner<SetupOnlyApp>);
 static_assert(!std::is_polymorphic_v<PlainApp>);
 static_assert(sizeof(ds_vk::MeshDebugMode) == sizeof(ds_vk::u8));
 static_assert(sizeof(ds_vk::LightType) == sizeof(ds_vk::u8));

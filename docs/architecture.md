@@ -24,19 +24,59 @@ is not a renderer abstraction layer, game engine, or cross-API project.
 
 ## Current Runtime Loop
 
-1. SDL polls input and ImGui consumes UI events. Left mouse clicks that are not
-   captured by ImGui are exposed through `FrameContext::input`.
-2. Camera controls update the shared `Camera`.
-3. The app receives `update(FrameContext&, dt)` if that method exists.
-4. The app appends mesh/debug commands to `FrameContext::draw`. Optional static
-   modules such as `ds_vk::Picker` can use the same frame data but stay outside
-   the runtime core.
-5. Built-in camera UI and the app's optional `draw_ui(FrameContext&)` build
-   ImGui draw data.
-6. If a supported shadow-casting light exists, the runtime renders shadow
-   producers into a depth-only shadow map from that light's view.
-7. Built-in pipelines render meshes, debug segments, and ImGui.
-8. Optional screenshot copy reads the swapchain into a VMA buffer and writes PNG.
+The primary API is explicit frame driving. `Runtime` owns the window, swapchain,
+per-frame command buffer, synchronization, ImGui frame setup, common render
+passes, and presentation. The app owns the order in which it asks those pieces to
+record work:
+
+```cpp
+ds_vk::Runtime runtime{cfg};
+runtime.initialize();
+
+while (auto* frame = runtime.begin_frame())
+{
+    app.update(*frame, frame->dt_seconds);
+
+    // Optional raw Vulkan outside the main color/depth render pass.
+    vkCmdBindPipeline(frame->command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdDispatch(frame->command_buffer, groups_x, groups_y, groups_z);
+
+    if (runtime.ui_visible())
+    {
+        runtime.draw_runtime_ui();
+        app.draw_ui(*frame);
+    }
+
+    runtime.render_shadow_pass();
+    runtime.begin_main_pass();
+    runtime.render_draw_list();
+
+    // Optional raw Vulkan inside the main render pass can be recorded here.
+
+    runtime.render_imgui();
+    runtime.end_main_pass();
+    runtime.end_frame();
+}
+```
+
+`begin_frame()` polls SDL input, updates the shared camera controls, starts a new
+ImGui frame, acquires a swapchain image, waits/resets the image fence and command
+pool, begins the primary command buffer, clears the frame `DrawList`, and returns
+the active `FrameContext`. A `nullptr` return means the app should exit.
+
+The built-in pass helpers then map closely to the raster frame:
+
+1. `render_shadow_pass()` records the optional depth-only shadow pass.
+2. `begin_main_pass()` begins the swapchain color/depth render pass.
+3. `render_draw_list()` records built-in mesh, environment, and debug pipelines.
+4. `render_imgui()` finalizes ImGui draw data and records it into the active pass.
+5. `end_main_pass()` closes the render pass and records optional screenshot copy.
+6. `end_frame()` ends/submits the command buffer, writes pending screenshots,
+   presents the swapchain image, and updates runtime stats.
+
+`Runtime::run_prototype(app)` still exists as a thin baby-mode wrapper around
+that protocol for quick CPU-heavy MVPs, but full apps in `app/` use the explicit
+loop directly.
 
 ## Current Shader Interface
 
@@ -128,19 +168,20 @@ shape; missing required mesh data remains an error.
 
 ## App Surface
 
+Apps are normal C++ objects. The framework does not require inheritance or an
+interface base class. A full app usually still has functions like this, but
+`main()` calls them explicitly:
+
 ```cpp
 class MyApp final
 {
   public:
     auto setup(ds_vk::Runtime& runtime) -> void;
-    auto update(ds_vk::FrameContext& frame, float dt_seconds) -> void;
+    auto update(ds_vk::FrameContext& frame, ds_vk::f32 dt_seconds) -> void;
     auto draw_ui(ds_vk::FrameContext& frame) -> void;
+    auto shutdown(ds_vk::Runtime& runtime) -> void;
 };
 ```
-
-`Runtime::run(app)` uses compile-time detection for these hook names instead of
-an inherited interface. `setup`, `draw_ui`, and `shutdown` are optional; a typo
-that leaves the app with no recognized hook fails to compile.
 
 The app can stay high-level for simple work:
 
@@ -183,8 +224,7 @@ vkCmdDispatch(frame.command_buffer, groups_x, groups_y, groups_z);
 ```
 
 Mesh upload/replacement requires an initialized runtime, so app code should do it
-from `setup`, `update`, or UI callbacks during `run`, not before calling
-`Runtime::run`.
+after `runtime.initialize()`, usually from `setup`, `update`, or UI callbacks.
 
 ## Selection Shape
 

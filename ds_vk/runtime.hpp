@@ -315,21 +315,6 @@ class Runtime;
 
 namespace detail
 {
-
-struct RuntimeCallbacks
-{
-    using SetupFn = auto (*)(void*, Runtime&) -> void;
-    using UpdateFn = auto (*)(void*, FrameContext&, f32) -> void;
-    using DrawUiFn = auto (*)(void*, FrameContext&) -> void;
-    using ShutdownFn = auto (*)(void*, Runtime&) -> void;
-
-    void* user{};
-    SetupFn setup{};
-    UpdateFn update{};
-    DrawUiFn draw_ui{};
-    ShutdownFn shutdown{};
-};
-
 template <typename App>
 concept has_setup = requires(App& app, Runtime& runtime) {
     { app.setup(runtime) } -> std::same_as<void>;
@@ -366,51 +351,21 @@ class Runtime
     Runtime(Runtime&&) noexcept;
     auto operator=(Runtime&&) noexcept -> Runtime&;
 
-    template <typename App>
-    [[nodiscard]]
-    auto run(App& app) -> int
-    {
-        static_assert(
-            detail::has_runtime_hook<App>,
-            "ds_vk apps must provide at least one of setup(Runtime&), "
-            "update(FrameContext&, f32), draw_ui(FrameContext&), or shutdown(Runtime&)."
-        );
-
-        const detail::RuntimeCallbacks callbacks{
-            .user = &app,
-            .setup = [](void* user, Runtime& runtime) -> void
-            {
-                if constexpr (detail::has_setup<App>)
-                {
-                    static_cast<App*>(user)->setup(runtime);
-                }
-            },
-            .update = [](void* user, FrameContext& frame, f32 dt_seconds) -> void
-            {
-                if constexpr (detail::has_update<App>)
-                {
-                    static_cast<App*>(user)->update(frame, dt_seconds);
-                }
-            },
-            .draw_ui = [](void* user, FrameContext& frame) -> void
-            {
-                if constexpr (detail::has_draw_ui<App>)
-                {
-                    static_cast<App*>(user)->draw_ui(frame);
-                }
-            },
-            .shutdown = [](void* user, Runtime& runtime) -> void
-            {
-                if constexpr (detail::has_shutdown<App>)
-                {
-                    static_cast<App*>(user)->shutdown(runtime);
-                }
-            },
-        };
-        return run_callbacks(callbacks);
-    }
-
     // clang-format off
+    auto initialize()                                                                                       -> void;
+    auto shutdown() noexcept                                                                                -> void;
+    [[nodiscard]] auto begin_frame()                                                                        -> FrameContext*;
+    [[nodiscard]] auto frame()                                                                              -> FrameContext&;
+    [[nodiscard]] auto frame() const                                                                        -> const FrameContext&;
+    auto draw_runtime_ui()                                                                                  -> void;
+    auto render_shadow_pass()                                                                               -> void;
+    auto begin_main_pass()                                                                                  -> void;
+    auto render_draw_list()                                                                                 -> void;
+    auto render_imgui()                                                                                     -> void;
+    auto end_main_pass()                                                                                    -> void;
+    auto end_frame()                                                                                        -> void;
+    [[nodiscard]] auto ui_visible() const noexcept                                                          -> bool;
+
     [[nodiscard]] auto upload_mesh(const MeshData& mesh)                                                     -> MeshHandle;
     [[nodiscard]] auto upload_mesh(const PositionNormalMeshData& mesh)                                       -> MeshHandle;
     [[nodiscard]] auto upload_mesh(const QuantizedPositionNormalMeshData& mesh)                              -> MeshHandle;
@@ -434,9 +389,54 @@ class Runtime
     [[nodiscard]] auto descriptor_indexing_support() const noexcept                             -> const DescriptorIndexingSupport&;
     // clang-format on
 
-  private:
-    auto run_callbacks(const detail::RuntimeCallbacks& callbacks) -> int;
+    template <typename App>
+    [[nodiscard]]
+    auto run_prototype(App& app) -> int
+    {
+        static_assert(
+            detail::has_runtime_hook<App>,
+            "ds_vk prototype apps must provide at least one of setup(Runtime&), "
+            "update(FrameContext&, f32), draw_ui(FrameContext&), or shutdown(Runtime&)."
+        );
 
+        initialize();
+        if constexpr (detail::has_setup<App>)
+        {
+            app.setup(*this);
+        }
+
+        while (auto* current_frame = begin_frame())
+        {
+            if constexpr (detail::has_update<App>)
+            {
+                app.update(*current_frame, current_frame->dt_seconds);
+            }
+
+            if (ui_visible())
+            {
+                draw_runtime_ui();
+                if constexpr (detail::has_draw_ui<App>)
+                {
+                    app.draw_ui(*current_frame);
+                }
+            }
+
+            render_shadow_pass();
+            begin_main_pass();
+            render_draw_list();
+            render_imgui();
+            end_main_pass();
+            end_frame();
+        }
+
+        if constexpr (detail::has_shutdown<App>)
+        {
+            app.shutdown(*this);
+        }
+        return 0;
+    }
+
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

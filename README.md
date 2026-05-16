@@ -6,6 +6,30 @@ This is deliberately not a game engine and not a cross-API abstraction. The
 runtime owns recurring setup work, while app code can still access raw Vulkan
 handles through `ds_vk::FrameContext`.
 
+The primary runtime API is explicit frame driving, not an inherited app runner:
+
+```cpp
+ds_vk::Runtime runtime{cfg};
+runtime.initialize();
+app.setup(runtime);
+
+while (auto* frame = runtime.begin_frame())
+{
+    app.update(*frame, frame->dt_seconds);
+
+    runtime.render_shadow_pass();
+    runtime.begin_main_pass();
+    runtime.render_draw_list();
+    runtime.render_imgui();
+    runtime.end_main_pass();
+    runtime.end_frame();
+}
+```
+
+Raw Vulkan commands can be recorded through `frame->command_buffer` between those
+phase calls. `Runtime::run_prototype(app)` exists only as a quick MVP wrapper
+around the same protocol.
+
 ## Build
 
 ```sh
@@ -66,6 +90,9 @@ for optional velocity arrows.
 physics state locally, uses Space to pause/resume simulation while camera input
 continues working, and routes speed coloring plus velocity arrows through
 `ds_vk::viz`.
+
+`ds_vk_quake_app` is currently an experimental stub for future Quake asset/render
+work.
 
 `ds_vk/assets.hpp` currently provides a small CPU-side glTF/GLB mesh loader into
 `MeshData`. It is intentionally not a runtime resource manager.

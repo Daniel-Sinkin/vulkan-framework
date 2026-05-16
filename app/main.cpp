@@ -838,7 +838,24 @@ auto main(int argc, char** argv) -> int
         app.set_normal_debug(start_normal_debug);
         app.set_camera_depth_debug(start_depth_debug);
         ds_vk::Runtime runtime{std::move(config)};
-        return runtime.run(app);
+        runtime.initialize();
+        app.setup(runtime);
+        while (auto* frame = runtime.begin_frame())
+        {
+            app.update(*frame, frame->dt_seconds);
+            if (runtime.ui_visible())
+            {
+                runtime.draw_runtime_ui();
+                app.draw_ui(*frame);
+            }
+            runtime.render_shadow_pass();
+            runtime.begin_main_pass();
+            runtime.render_draw_list();
+            runtime.render_imgui();
+            runtime.end_main_pass();
+            runtime.end_frame();
+        }
+        return 0;
     }
     catch (const std::exception& error)
     {

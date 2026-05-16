@@ -3536,7 +3536,25 @@ auto main(int argc, char** argv) -> int
 
         Runtime runtime{std::move(config)};
         DfsphPlaybackApp app{app_cfg};
-        return runtime.run(app);
+        runtime.initialize();
+        app.setup(runtime);
+        while (auto* frame = runtime.begin_frame())
+        {
+            app.update(*frame, frame->dt_seconds);
+            if (runtime.ui_visible())
+            {
+                runtime.draw_runtime_ui();
+                app.draw_ui(*frame);
+            }
+            runtime.render_shadow_pass();
+            runtime.begin_main_pass();
+            runtime.render_draw_list();
+            runtime.render_imgui();
+            runtime.end_main_pass();
+            runtime.end_frame();
+        }
+        app.shutdown(runtime);
+        return 0;
     }
     catch (const std::exception& error)
     {

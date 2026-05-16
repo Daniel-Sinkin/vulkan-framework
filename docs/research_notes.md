@@ -1231,3 +1231,20 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
   - `./.venv/bin/python scripts/validate_screenshot.py run/dfsph_quantized_surface_smoke.png`
   - pixel comparison between compact decoded and quantized screenshot:
     `mean_abs_rgb [0.0, 0.0, 0.0]`, `max_channel 0`.
+
+## 2026-05-17 Explicit Frame API Cut
+
+- Changed the framework center from `Runtime::run(app)` to explicit frame
+  driving. The intended app shape is now `initialize()`, `begin_frame()`, raw
+  Vulkan/app work, `render_shadow_pass()`, `begin_main_pass()`,
+  `render_draw_list()`, optional raw in-pass work, `render_imgui()`,
+  `end_main_pass()`, and `end_frame()`.
+- This is a deliberate Vulkan-mental-model choice. The runtime still owns SDL,
+  swapchain acquisition, per-frame command buffers, fences/semaphores, common
+  render passes, ImGui setup/rendering, and presentation, but app code chooses
+  command order when it needs compute, barriers, custom transfer work, or custom
+  render commands.
+- Kept `Runtime::run_prototype(app)` as a thin baby-mode wrapper around the
+  manual protocol for quick CPU-side MVPs. It is no longer the conceptual core.
+- Full app users (`basic`, `vectorfield`, `pba`, `dfsph`) were moved to the
+  explicit loop so the repo itself demonstrates the preferred API.
