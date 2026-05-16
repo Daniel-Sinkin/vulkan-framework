@@ -48,8 +48,11 @@ class BasicViewerApp final
             runtime.load_texture(asset_path("textures/polyhaven/concrete_floor_diff_1k.jpg"));
         cube_texture_ =
             runtime.load_texture(asset_path("textures/polyhaven/wood_table_001_diff_1k.png"));
+        environment_texture_ =
+            runtime.load_hdr_texture(asset_path("hdri/polyhaven/studio_small_01_1k.hdr"));
         materials_.floor.textures.base_color = floor_texture_;
         materials_.cube.textures.base_color = cube_texture_;
+        environment_.texture = environment_texture_;
         rebuild_sphere();
         rebuild_vector_field();
 
@@ -247,6 +250,20 @@ class BasicViewerApp final
                 ImGui::DragFloat3("Spot direction", &lights_.spot.direction.x, 0.02f);
                 ImGui::SliderFloat("Spot intensity", &lights_.spot.intensity, 0.0f, 60.0f, "%.2f");
                 ImGui::SliderFloat("Spot range", &lights_.spot.range, 0.5f, 12.0f, "%.2f");
+                ImGui::Checkbox("HDRI background", &environment_.visible_to_camera);
+                ImGui::SliderFloat(
+                    "HDRI lighting", &environment_.lighting_intensity, 0.0f, 2.0f, "%.2f"
+                );
+                ImGui::SliderFloat(
+                    "HDRI background intensity",
+                    &environment_.background_intensity,
+                    0.0f,
+                    2.0f,
+                    "%.2f"
+                );
+                ImGui::SliderAngle(
+                    "HDRI rotation", &environment_.rotation_radians, -180.0f, 180.0f
+                );
             }
             ImGui::Separator();
             {  // Sphere
@@ -358,6 +375,7 @@ class BasicViewerApp final
     auto configure_lighting(DrawList& draw) const -> void
     {
         draw.set_ambient_light(lights_.ambient);
+        draw.set_environment(environment_);
         draw.directional_light(lights_.sun);
         draw.radial_light(lights_.radial);
         draw.spot_light(lights_.spot);
@@ -603,6 +621,7 @@ class BasicViewerApp final
     MeshHandle cube_mesh_{};
     TextureHandle floor_texture_{};
     TextureHandle cube_texture_{};
+    TextureHandle environment_texture_{};
     ObjectId selected_object_id_{};
     Vec3 sphere_position_{k_axis_z};
     Vec3 small_sphere_position_{1.15f, -1.45f, 0.42f};
@@ -697,6 +716,13 @@ class BasicViewerApp final
         };
     };
     LightsConfig lights_{};
+
+    EnvironmentConfig environment_{
+        .lighting_intensity = 0.32f,
+        .background_intensity = 0.75f,
+        .rotation_radians = glm::radians(22.0f),
+        .visible_to_camera = true,
+    };
 
     struct CameraDepthDebugConfig
     {

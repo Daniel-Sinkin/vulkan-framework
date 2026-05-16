@@ -258,6 +258,40 @@ Migration decisions:
   extensions can add later chunks:
   https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#chunks-overview.
 
+## Environment HDRI Pass
+
+Start time for this pass: 2026-05-16.
+
+Source asset:
+
+- Poly Haven `studio_small_01`, CC0:
+  https://polyhaven.com/a/studio_small_01
+- Vendored file:
+  `assets/hdri/polyhaven/studio_small_01_1k.hdr`
+
+Implementation decisions:
+
+- Use a 2D equirectangular HDR texture for the first pass, not a cubemap or
+  prefiltered irradiance/specular map. This keeps the implementation small and
+  shader-based while still making roughness/metallic changes respond to the
+  environment.
+- Reuse the existing material texture descriptor array for the HDRI instead of
+  adding a new sampler binding. The earlier MoltenVK validation work showed the
+  fragment-stage sampler limit is tight; using the table slot keeps the layout
+  at 15 material/HDRI textures plus one shadow sampler.
+- Add `Runtime::load_hdr_texture()` using `stbi_loadf` and
+  `VK_FORMAT_R32G32B32A32_SFLOAT`. Regular LDR material loading remains through
+  `Runtime::load_texture()`.
+- Add `DrawList::set_environment()` as per-frame draw data. The environment is
+  app-owned state, while the runtime owns the Vulkan texture and descriptor
+  table.
+- Background rendering uses a small fullscreen-triangle pipeline sampling the
+  same equirectangular texture. Mesh lighting uses a deliberately approximate
+  shader-side term: sample the environment along the normal for diffuse and
+  along the reflection vector for specular. A later pass can replace this with
+  irradiance and prefiltered reflection maps once the framework needs higher
+  fidelity.
+
 Useful follow-up pressure points:
 
 - DFSPH particle rendering as one draw per particle is good enough for the MVP,

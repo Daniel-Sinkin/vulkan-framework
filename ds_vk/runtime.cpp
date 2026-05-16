@@ -102,6 +102,7 @@ struct GpuLighting
     Vec4 ambient_light_count{};
     Mat4 shadow_view_projection{1.0f};
     Vec4 shadow_params{};
+    Vec4 environment_params{};
     std::array<GpuLight, k_max_lights> lights{};
 };
 
@@ -137,6 +138,13 @@ struct DebugPushConstants
     Vec4 camera_right{k_axis_x, 0.0f};
 };
 
+struct EnvironmentPushConstants
+{
+    Mat4 inverse_view_projection{1.0f};
+    Vec4 camera_position{0.0f, 0.0f, 0.0f, 1.0f};
+    Vec4 params{};
+};
+
 // clang-format off
 static_assert(sizeof(MeshPushConstants)              == 128zu);
 static_assert(sizeof(GpuMaterial)                    == 160zu);
@@ -150,11 +158,13 @@ static_assert(offsetof(GpuMaterial, debug_params2)   == 112zu);
 static_assert(offsetof(GpuMaterial, camera_position) == 128zu);
 static_assert(offsetof(GpuMaterial, camera_forward)  == 144zu);
 static_assert(sizeof(GpuLight)                       == 64zu);
-static_assert(sizeof(GpuLighting)                    == 96zu + static_cast<usize>(k_max_lights) * sizeof(GpuLight));
+static_assert(sizeof(GpuLighting)                    == 112zu + static_cast<usize>(k_max_lights) * sizeof(GpuLight));
 static_assert(sizeof(DebugPushConstants)             == 96zu);
+static_assert(sizeof(EnvironmentPushConstants)       == 96zu);
 // clang-format on
-constexpr auto k_required_push_constant_bytes =
-    std::max(sizeof(MeshPushConstants), sizeof(DebugPushConstants));
+constexpr auto k_required_push_constant_bytes = std::max(
+    {sizeof(MeshPushConstants), sizeof(DebugPushConstants), sizeof(EnvironmentPushConstants)}
+);
 
 [[nodiscard]] auto material_base_color_texture_index(const Material& material) noexcept -> u32
 {
@@ -368,17 +378,29 @@ light_view_projection_matrix(const LightConfig& light, const Camera& camera) noe
 [[nodiscard]] auto build_gpu_lighting(
     std::span<const LightConfig> lights,
     Color ambient_light,
+    const EnvironmentConfig& environment,
     const Camera& camera,
     u32 shadow_index,
     u32 shadow_resolution
 ) noexcept -> GpuLighting
 {
     auto lighting = GpuLighting{
-        .ambient_light_count = Vec4{
-            ambient_light.r(),
-            ambient_light.g(),
-            ambient_light.b(),
-            static_cast<f32>(std::min(static_cast<u32>(lights.size()), k_max_lights)),
+        .ambient_light_count =
+            Vec4{
+                ambient_light.r(),
+                ambient_light.g(),
+                ambient_light.b(),
+                static_cast<f32>(std::min(static_cast<u32>(lights.size()), k_max_lights)),
+            },
+        .environment_params = Vec4{
+            environment.texture.valid() ? environment.lighting_intensity : 0.0f,
+            environment.texture.valid() and environment.visible_to_camera
+                ? environment.background_intensity
+                : 0.0f,
+            environment.rotation_radians,
+            environment.texture.valid() and environment.texture.id < k_max_material_textures
+                ? static_cast<f32>(environment.texture.id)
+                : -1.0f,
         },
     };
     if (shadow_index < lights.size())
@@ -510,6 +532,7 @@ auto DrawList::clear() -> void
     debug_segments_.clear();
     lights_.clear();
     ambient_light_ = Color{0.035f, 0.040f, 0.050f, 1.0f};
+    environment_ = {};
 }
 
 auto DrawList::set_ambient_light(Color color) -> void
@@ -677,6 +700,11 @@ auto DrawList::spot_light(const SpotLightConfig& config) -> void
     );
 }
 
+auto DrawList::set_environment(const EnvironmentConfig& config) -> void
+{
+    environment_ = config;
+}
+
 auto DrawList::mesh_commands() const noexcept -> std::span<const MeshDrawCommand>
 {
     return std::span<const MeshDrawCommand>{mesh_commands_.data(), mesh_commands_.size()};
@@ -695,6 +723,11 @@ auto DrawList::lights() const noexcept -> std::span<const LightConfig>
 auto DrawList::ambient_light() const noexcept -> Color
 {
     return ambient_light_;
+}
+
+auto DrawList::environment() const noexcept -> const EnvironmentConfig&
+{
+    return environment_;
 }
 
 struct Runtime::Impl
@@ -728,6 +761,7 @@ struct Runtime::Impl
     VkDescriptorPool mesh_descriptor_pool{VK_NULL_HANDLE};
     std::vector<VkDescriptorSet> mesh_descriptor_sets;
     VkPipelineLayout mesh_pipeline_layout{VK_NULL_HANDLE};
+    VkPipeline environment_pipeline{VK_NULL_HANDLE};
     VkPipeline mesh_pipeline{VK_NULL_HANDLE};
     VkPipelineLayout shadow_pipeline_layout{VK_NULL_HANDLE};
     VkPipeline shadow_pipeline{VK_NULL_HANDLE};
@@ -771,11 +805,15 @@ struct Runtime::Impl
     auto destroy_buffer(Buffer& buffer) noexcept -> void;
     auto begin_immediate_commands() -> VkCommandBuffer;
     auto end_immediate_commands(VkCommandBuffer command_buffer) -> void;
-    auto create_texture_resource(const u8* pixels, u32 width, u32 height, VkFormat format)
-        -> TextureResource;
+    auto create_texture_resource(
+        const void* pixels, u32 width, u32 height, VkFormat format, VkDeviceSize bytes_per_pixel
+    ) -> TextureResource;
     auto create_default_texture() -> void;
     auto destroy_texture(TextureResource& texture) noexcept -> void;
     auto load_texture(const std::filesystem::path& path, const TextureLoadConfig& load_config)
+        -> TextureHandle;
+    auto
+    load_hdr_texture(const std::filesystem::path& path, const HdrTextureLoadConfig& load_config)
         -> TextureHandle;
     auto ensure_debug_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_mesh_material_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&;
@@ -791,6 +829,8 @@ struct Runtime::Impl
         VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index, ImDrawData* draw_data
     ) -> void;
     auto draw_shadow_map(VkCommandBuffer command_buffer) -> void;
+    auto draw_environment(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
+        -> void;
     auto draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index) -> void;
     auto draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index) -> void;
     auto draw_runtime_ui() -> void;
@@ -895,16 +935,20 @@ auto Runtime::Impl::end_immediate_commands(const VkCommandBuffer command_buffer)
 }
 
 auto Runtime::Impl::create_texture_resource(
-    const u8* pixels, u32 width, u32 height, VkFormat format
+    const void* pixels,
+    const u32 width,
+    const u32 height,
+    const VkFormat format,
+    const VkDeviceSize bytes_per_pixel
 ) -> TextureResource
 {
-    if (width == 0u or height == 0u or !pixels)
+    if (width == 0u or height == 0u or !pixels or bytes_per_pixel == 0u)
     {
         throw std::runtime_error("cannot create texture from empty image data");
     }
 
     const auto pixel_bytes =
-        static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4u;
+        static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * bytes_per_pixel;
     auto staging = create_buffer(
         pixel_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, VMA_MEMORY_USAGE_AUTO_PREFER_HOST
     );
@@ -1046,7 +1090,7 @@ auto Runtime::Impl::create_default_texture() -> void
         return;
     }
     constexpr auto white = std::array<u8, 4>{255u, 255u, 255u, 255u};
-    textures.push_back(create_texture_resource(white.data(), 1u, 1u, VK_FORMAT_R8G8B8A8_UNORM));
+    textures.push_back(create_texture_resource(white.data(), 1u, 1u, VK_FORMAT_R8G8B8A8_UNORM, 4u));
 }
 
 auto Runtime::Impl::destroy_texture(TextureResource& texture) noexcept -> void
@@ -1093,7 +1137,71 @@ auto Runtime::Impl::load_texture(
     {
         const auto format = load_config.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
         texture = create_texture_resource(
-            pixels, static_cast<u32>(width), static_cast<u32>(height), format
+            pixels, static_cast<u32>(width), static_cast<u32>(height), format, 4u
+        );
+    }
+    catch (...)
+    {
+        stbi_image_free(pixels);
+        throw;
+    }
+    stbi_image_free(pixels);
+
+    const auto index = static_cast<u32>(textures.size());
+    try
+    {
+        textures.push_back(texture);
+    }
+    catch (...)
+    {
+        destroy_texture(texture);
+        throw;
+    }
+    update_mesh_texture_descriptors();
+    return TextureHandle{.id = index};
+}
+
+auto Runtime::Impl::load_hdr_texture(
+    const std::filesystem::path& path, const HdrTextureLoadConfig& load_config
+) -> TextureHandle
+{
+    if (textures.size() >= k_max_material_textures)
+    {
+        throw std::runtime_error(
+            std::format("ds_vk texture table is full (max {})", k_max_material_textures)
+        );
+    }
+
+    auto width = int{};
+    auto height = int{};
+    auto channels = int{};
+    auto* pixels = stbi_loadf(path.string().c_str(), &width, &height, &channels, STBI_rgb_alpha);
+    if (!pixels)
+    {
+        throw std::runtime_error(
+            std::format("failed to load HDR texture {}: {}", path.string(), stbi_failure_reason())
+        );
+    }
+    if (width <= 0 or height <= 0)
+    {
+        stbi_image_free(pixels);
+        throw std::runtime_error(std::format("HDR texture has invalid size: {}", path.string()));
+    }
+    const auto pixel_count = static_cast<usize>(width) * static_cast<usize>(height) * 4zu;
+    for (auto i = 0zu; i < pixel_count; ++i)
+    {
+        pixels[i] *= load_config.exposure;
+    }
+
+    auto texture = TextureResource{};
+    try
+    {
+        texture = create_texture_resource(
+            pixels,
+            static_cast<u32>(width),
+            static_cast<u32>(height),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            4u * sizeof(f32)
         );
     }
     catch (...)
@@ -2009,6 +2117,8 @@ auto Runtime::Impl::create_pipelines() -> void
 
     const auto mesh_vert = create_shader_module(device, shader_dir / "mesh.vert.spv");
     const auto mesh_frag = create_shader_module(device, shader_dir / "mesh.frag.spv");
+    const auto environment_vert = create_shader_module(device, shader_dir / "environment.vert.spv");
+    const auto environment_frag = create_shader_module(device, shader_dir / "environment.frag.spv");
     const auto shadow_vert = create_shader_module(device, shader_dir / "shadow.vert.spv");
     const auto debug_vert = create_shader_module(device, shader_dir / "debug_line.vert.spv");
     const auto debug_frag = create_shader_module(device, shader_dir / "debug_line.frag.spv");
@@ -2017,6 +2127,8 @@ auto Runtime::Impl::create_pipelines() -> void
     {
         vkDestroyShaderModule(device, mesh_vert, allocation_callbacks);
         vkDestroyShaderModule(device, mesh_frag, allocation_callbacks);
+        vkDestroyShaderModule(device, environment_vert, allocation_callbacks);
+        vkDestroyShaderModule(device, environment_frag, allocation_callbacks);
         vkDestroyShaderModule(device, shadow_vert, allocation_callbacks);
         vkDestroyShaderModule(device, debug_vert, allocation_callbacks);
         vkDestroyShaderModule(device, debug_frag, allocation_callbacks);
@@ -2051,8 +2163,12 @@ auto Runtime::Impl::create_pipelines() -> void
     shadow_binding.descriptorCount = 1;
     shadow_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    const auto mesh_descriptor_bindings =
-        std::array{material_binding, texture_binding, lighting_binding, shadow_binding};
+    const auto mesh_descriptor_bindings = std::array{
+        material_binding,
+        texture_binding,
+        lighting_binding,
+        shadow_binding,
+    };
     VkDescriptorSetLayoutCreateInfo mesh_descriptor_layout_info{};
     mesh_descriptor_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     mesh_descriptor_layout_info.bindingCount = static_cast<u32>(mesh_descriptor_bindings.size());
@@ -2250,6 +2366,31 @@ auto Runtime::Impl::create_pipelines() -> void
         device, pipeline_cache, 1, &mesh_pipeline_info, allocation_callbacks, &mesh_pipeline
     ));
 
+    VkPipelineVertexInputStateCreateInfo environment_vertex_input{};
+    environment_vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    auto environment_depth_state = depth_state;
+    environment_depth_state.depthTestEnable = VK_TRUE;
+    environment_depth_state.depthWriteEnable = VK_FALSE;
+    environment_depth_state.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    const auto environment_stages = std::array{
+        make_stage(environment_vert, VK_SHADER_STAGE_VERTEX_BIT),
+        make_stage(environment_frag, VK_SHADER_STAGE_FRAGMENT_BIT),
+    };
+    VkGraphicsPipelineCreateInfo environment_pipeline_info = mesh_pipeline_info;
+    environment_pipeline_info.stageCount = static_cast<u32>(environment_stages.size());
+    environment_pipeline_info.pStages = environment_stages.data();
+    environment_pipeline_info.pVertexInputState = &environment_vertex_input;
+    environment_pipeline_info.pDepthStencilState = &environment_depth_state;
+    check_vk_result(vkCreateGraphicsPipelines(
+        device,
+        pipeline_cache,
+        1,
+        &environment_pipeline_info,
+        allocation_callbacks,
+        &environment_pipeline
+    ));
+
     const auto shadow_attributes = std::array{
         VkVertexInputAttributeDescription{
             .location = 0,
@@ -2390,6 +2531,11 @@ auto Runtime::Impl::destroy_pipelines() noexcept -> void
         vkDestroyPipeline(device, mesh_pipeline, allocation_callbacks);
         mesh_pipeline = VK_NULL_HANDLE;
     }
+    if (environment_pipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, environment_pipeline, allocation_callbacks);
+        environment_pipeline = VK_NULL_HANDLE;
+    }
     if (mesh_pipeline_layout != VK_NULL_HANDLE)
     {
         vkDestroyPipelineLayout(device, mesh_pipeline_layout, allocation_callbacks);
@@ -2504,6 +2650,46 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
     );
 }
 
+auto Runtime::Impl::draw_environment(
+    VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index
+) -> void
+{
+    const auto& environment = draw_list.environment();
+    if (!environment.texture.valid() or !environment.visible_to_camera
+        or environment.texture.id >= k_max_material_textures
+        or environment.background_intensity <= 0.0f or environment_pipeline == VK_NULL_HANDLE)
+    {
+        return;
+    }
+    const auto aspect = static_cast<f32>(std::max(1u, extent.width))
+                        / static_cast<f32>(std::max(1u, extent.height));
+    const auto push = EnvironmentPushConstants{
+        .inverse_view_projection = glm::inverse(camera.view_projection_matrix(aspect)),
+        .camera_position = Vec4{camera.position(), 1.0f},
+        .params = Vec4{
+            environment.background_intensity,
+            environment.rotation_radians,
+            static_cast<f32>(environment.texture.id),
+            0.0f,
+        },
+    };
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, environment_pipeline);
+    vkCmdBindDescriptorSets(
+        command_buffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        mesh_pipeline_layout,
+        0,
+        1,
+        &mesh_descriptor_sets.at(frame_index),
+        0,
+        nullptr
+    );
+    vkCmdPushConstants(
+        command_buffer, mesh_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push
+    );
+    vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
+}
+
 auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
     -> void
 {
@@ -2518,7 +2704,12 @@ auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D exten
     const auto& lights = draw_list.lights();
     const auto active_shadow_index = shadow_light_index(lights);
     mesh_lighting_upload = build_gpu_lighting(
-        lights, draw_list.ambient_light(), camera, active_shadow_index, shadow_map.resolution
+        lights,
+        draw_list.ambient_light(),
+        draw_list.environment(),
+        camera,
+        active_shadow_index,
+        shadow_map.resolution
     );
     auto& lighting_buffer = ensure_mesh_lighting_buffer(frame_index);
     std::memcpy(lighting_buffer.mapped, &mesh_lighting_upload, sizeof(mesh_lighting_upload));
@@ -2632,6 +2823,7 @@ auto Runtime::Impl::render_frame(
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
     draw_meshes(command_buffer, extent, frame_index);
+    draw_environment(command_buffer, extent, frame_index);
     draw_debug(command_buffer, extent, frame_index);
 
     if (draw_data)
@@ -3413,6 +3605,13 @@ auto Runtime::load_texture(const std::filesystem::path& path, const TextureLoadC
     -> TextureHandle
 {
     return impl_->load_texture(path, config);
+}
+
+auto Runtime::load_hdr_texture(
+    const std::filesystem::path& path, const HdrTextureLoadConfig& config
+) -> TextureHandle
+{
+    return impl_->load_hdr_texture(path, config);
 }
 
 auto Runtime::request_screenshot(std::filesystem::path path, const bool transparent) -> void

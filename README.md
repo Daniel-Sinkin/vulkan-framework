@@ -48,6 +48,7 @@ The first full user lives in `app/`, not `examples/`. `ds_vk_basic_app` shows:
 - generated floor quad
 - generated cube
 - generated smooth UV sphere with adjustable slices/stacks
+- CC0 Poly Haven HDRI background and approximate environment lighting
 - debug line/arrow/sphere grid and axes
 - swapchain screenshot capture
 

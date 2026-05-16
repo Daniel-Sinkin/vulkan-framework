@@ -134,6 +134,15 @@ struct LightConfig
     bool enabled{true};
 };
 
+struct EnvironmentConfig
+{
+    TextureHandle texture{};
+    f32 lighting_intensity{0.0f};
+    f32 background_intensity{0.0f};
+    f32 rotation_radians{};
+    bool visible_to_camera{true};
+};
+
 struct DirectionalLightConfig
 {
     Vec3 direction{-0.45f, -0.35f, -0.82f};
@@ -180,11 +189,13 @@ class DrawList
     auto directional_light(const DirectionalLightConfig& config)       -> void;
     auto radial_light(const RadialLightConfig& config)                 -> void;
     auto spot_light(const SpotLightConfig& config)                     -> void;
+    auto set_environment(const EnvironmentConfig& config)              -> void;
 
     [[nodiscard]] auto mesh_commands() const noexcept                  -> std::span<const MeshDrawCommand>;
     [[nodiscard]] auto debug_segments() const noexcept                 -> std::span<const DebugSegment>;
     [[nodiscard]] auto lights() const noexcept                         -> std::span<const LightConfig>;
     [[nodiscard]] auto ambient_light() const noexcept                  -> Color;
+    [[nodiscard]] auto environment() const noexcept                    -> const EnvironmentConfig&;
     // clang-format on
 
   private:
@@ -192,6 +203,7 @@ class DrawList
     std::vector<DebugSegment> debug_segments_{};
     std::vector<LightConfig> lights_{};
     Color ambient_light_{0.035f, 0.040f, 0.050f, 1.0f};
+    EnvironmentConfig environment_{};
 };
 
 struct RuntimeStats
@@ -223,6 +235,11 @@ struct RuntimeConfig
 struct TextureLoadConfig
 {
     bool srgb{true};
+};
+
+struct HdrTextureLoadConfig
+{
+    f32 exposure{1.0f};
 };
 
 struct KeyboardModifiers
@@ -371,6 +388,9 @@ class Runtime
     [[nodiscard]] auto upload_mesh(const MeshData& mesh)                                                     -> MeshHandle;
     [[nodiscard]] auto replace_mesh(MeshHandle handle, const MeshData& mesh)                                 -> MeshHandle;
     [[nodiscard]] auto load_texture(const std::filesystem::path& path, const TextureLoadConfig& config = {}) -> TextureHandle;
+    [[nodiscard]] auto load_hdr_texture(
+        const std::filesystem::path& path, const HdrTextureLoadConfig& config = {}
+    ) -> TextureHandle;
     auto request_screenshot(std::filesystem::path path, bool transparent = false)                            -> void;
 
     auto camera(const CameraConfig& config) noexcept                                            -> Camera&;

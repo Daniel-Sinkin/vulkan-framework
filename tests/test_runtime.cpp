@@ -160,6 +160,17 @@ auto test_draw_list() -> void
 
     draw.set_ambient_light(ds_vk::Color{0.1f, 0.2f, 0.3f, 1.0f});
     check(draw.ambient_light().g() == 0.2f, "draw list records ambient light");
+    draw.set_environment({
+        .texture = {.id = 6u},
+        .lighting_intensity = 0.42f,
+        .background_intensity = 0.75f,
+        .rotation_radians = 0.25f,
+    });
+    check(draw.environment().texture.id == 6u, "draw list records environment texture");
+    check(
+        draw.environment().lighting_intensity == 0.42f,
+        "draw list records environment lighting intensity"
+    );
     draw.directional_light({
         .direction = {-1.0f, -1.0f, -1.0f},
         .intensity = 2.0f,
@@ -219,6 +230,7 @@ auto test_draw_list() -> void
     check(draw.debug_segments().empty(), "clear removes debug segments");
     check(draw.lights().empty(), "clear removes lights");
     check(draw.ambient_light().r() == 0.035f, "clear resets ambient light");
+    check(!draw.environment().texture.valid(), "clear resets environment texture");
 }
 }  // namespace
 

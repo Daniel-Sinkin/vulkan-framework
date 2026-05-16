@@ -35,6 +35,7 @@ struct Lighting
     vec4 ambient_light_count;
     mat4 shadow_view_projection;
     vec4 shadow_params;
+    vec4 environment_params;
     Light lights[16];
 };
 
@@ -90,6 +91,27 @@ float geometry_smith(vec3 normal, vec3 view, vec3 light, float roughness)
 vec3 fresnel_schlick(float cos_theta, vec3 f0)
 {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+vec2 equirect_uv(vec3 direction)
+{
+    vec3 safe_direction = normalize(direction);
+    float u = atan(safe_direction.y, safe_direction.x) / (2.0 * PI) + 0.5;
+    float v = 0.5 - asin(clamp(safe_direction.z, -1.0, 1.0)) / PI;
+    return vec2(fract(u), clamp(v, 0.0, 1.0));
+}
+
+vec3 rotate_z(vec3 value, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec3(c * value.x - s * value.y, s * value.x + c * value.y, value.z);
+}
+
+vec3 sample_environment(vec3 direction, float rotation, uint texture_index)
+{
+    return texture(material_textures[texture_index], equirect_uv(rotate_z(direction, rotation)))
+        .rgb;
 }
 
 vec3 normalize_or(vec3 value, vec3 fallback)
@@ -250,6 +272,28 @@ vec3 evaluate_light(
     return pbr_light(albedo, metallic, roughness, normal, view, light_direction, radiance);
 }
 
+vec3 environment_light(
+    vec3 albedo, float metallic, float roughness, float ambient_occlusion, vec3 normal, vec3 view
+)
+{
+    vec4 params = lighting_buffer.lighting.environment_params;
+    if (params.w < 0.0 || params.x <= 0.0)
+    {
+        return vec3(0.0);
+    }
+
+    float rotation = params.z;
+    uint texture_index = uint(params.w + 0.5);
+    vec3 f0 = mix(vec3(0.04), albedo, metallic);
+    vec3 fresnel = fresnel_schlick(max(dot(normal, view), 0.0), f0);
+    vec3 diffuse_env = sample_environment(normal, rotation, texture_index);
+    vec3 reflection = reflect(-view, normal);
+    vec3 specular_env = sample_environment(reflection, rotation, texture_index);
+    vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * albedo * diffuse_env;
+    vec3 specular = fresnel * specular_env * max(0.0, 1.0 - 0.72 * roughness);
+    return (diffuse + specular) * params.x * ambient_occlusion;
+}
+
 vec3 apply_debug(vec3 shaded_color, vec3 normal, Material material)
 {
     uint mode = uint(material.debug_params.x + 0.5);
@@ -313,6 +357,7 @@ void main()
     vec3 color = ambient + material.emissive_color.rgb;
     if (material.render_params.x > 0.5)
     {
+        color += environment_light(albedo, metallic, roughness, ambient_occlusion, normal, view);
         uint light_count = min(uint(lighting_buffer.lighting.ambient_light_count.w + 0.5), 16u);
         for (uint i = 0u; i < light_count; ++i)
         {

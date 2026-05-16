@@ -50,8 +50,9 @@ is not a renderer abstraction layer, game engine, or cross-API project.
 - The first mesh pipeline binds a per-frame material storage buffer and a
   per-frame lighting storage buffer. The mesh fragment shader uses
   Cook-Torrance metallic/roughness lighting from explicit directional, radial,
-  and spot lights; view direction comes from the actual camera position stored
-  in the material buffer. Each non-instanced draw passes its material index
+  and spot lights plus a lightweight equirectangular HDR environment term; view
+  direction comes from the actual camera position stored in the material buffer.
+  Each non-instanced draw passes its material index
   through `firstInstance`/`gl_InstanceIndex`.
 - Materials currently carry base color, emissive color, metallic, roughness,
   ambient occlusion, and an optional base-color texture handle. Emission only
@@ -59,10 +60,11 @@ is not a renderer abstraction layer, game engine, or cross-API project.
 - Material textures are bound through a fixed 15-slot combined-image-sampler
   table. Slot 0 is a generated white fallback; app-loaded texture handles occupy
   later slots and materials opt into them with
-  `.textures = {.base_color = handle}`. The table is 15 rather than 16 because
-  the same shader also binds one shadow-map sampler, keeping the current layout
-  under the validated MoltenVK per-stage sampler limit before a later bindless
-  pass.
+  `.textures = {.base_color = handle}`. The HDR environment texture also lives
+  in this same table, and the selected slot is passed through the lighting data.
+  That avoids adding another fragment sampler binding and keeps the current
+  layout under the validated MoltenVK per-stage sampler limit before a later
+  bindless pass.
 - Mesh draw configs also carry an `ObjectId` and `MeshDebugConfig`. Hidden draws
   are culled before recording; selected/color-override/scalar-heatmap/normal/id
   views are applied in the mesh fragment shader. `camera_depth` debug mode
