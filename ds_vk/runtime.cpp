@@ -32,7 +32,8 @@ namespace
 {
 constexpr auto k_swapchain_image_usage =
     VkImageUsageFlags{VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
-constexpr auto k_max_material_textures = u32{16};
+constexpr auto k_max_material_textures = u32{15};
+constexpr auto k_max_lights = u32{16};
 constexpr auto k_default_texture_index = u32{0};
 
 struct Buffer
@@ -62,16 +63,46 @@ struct TextureResource
     VkFormat format{VK_FORMAT_UNDEFINED};
 };
 
+struct ShadowMap
+{
+    VkImage image{VK_NULL_HANDLE};
+    VmaAllocation allocation{VK_NULL_HANDLE};
+    VkImageView view{VK_NULL_HANDLE};
+    VkSampler sampler{VK_NULL_HANDLE};
+    VkRenderPass render_pass{VK_NULL_HANDLE};
+    VkFramebuffer framebuffer{VK_NULL_HANDLE};
+    u32 resolution{};
+    VkFormat format{VK_FORMAT_UNDEFINED};
+};
+
 struct GpuMaterial
 {
     Vec4 base_color{1.0f};
     Vec4 emissive_color{0.0f, 0.0f, 0.0f, 1.0f};
     Vec4 pbr_params{0.0f, 0.55f, 1.0f, 0.0f};
     Vec4 texture_params{0.0f};
+    Vec4 render_params{1.0f};
     Vec4 debug_color{1.0f, 0.0f, 1.0f, 0.85f};
     Vec4 debug_params{0.0f};
     Vec4 debug_params2{0.0f};
     Vec4 camera_position{0.0f, 0.0f, 1.0f, 1.0f};
+    Vec4 camera_forward{0.0f, -1.0f, 0.0f, 0.0f};
+};
+
+struct GpuLight
+{
+    Vec4 position_range{};
+    Vec4 direction_type{};
+    Vec4 color_intensity{1.0f};
+    Vec4 spot_shadow{};
+};
+
+struct GpuLighting
+{
+    Vec4 ambient_light_count{};
+    Mat4 shadow_view_projection{1.0f};
+    Vec4 shadow_params{};
+    std::array<GpuLight, k_max_lights> lights{};
 };
 
 struct DepthAttachment
@@ -107,17 +138,31 @@ struct DebugPushConstants
 };
 
 static_assert(sizeof(MeshPushConstants) == 128u);
-static_assert(sizeof(GpuMaterial) == 128u);
+static_assert(sizeof(GpuMaterial) == 160u);
 static_assert(offsetof(GpuMaterial, emissive_color) == 16u);
 static_assert(offsetof(GpuMaterial, pbr_params) == 32u);
 static_assert(offsetof(GpuMaterial, texture_params) == 48u);
-static_assert(offsetof(GpuMaterial, debug_color) == 64u);
-static_assert(offsetof(GpuMaterial, debug_params) == 80u);
-static_assert(offsetof(GpuMaterial, debug_params2) == 96u);
-static_assert(offsetof(GpuMaterial, camera_position) == 112u);
+static_assert(offsetof(GpuMaterial, render_params) == 64u);
+static_assert(offsetof(GpuMaterial, debug_color) == 80u);
+static_assert(offsetof(GpuMaterial, debug_params) == 96u);
+static_assert(offsetof(GpuMaterial, debug_params2) == 112u);
+static_assert(offsetof(GpuMaterial, camera_position) == 128u);
+static_assert(offsetof(GpuMaterial, camera_forward) == 144u);
+static_assert(sizeof(GpuLight) == 64u);
+static_assert(sizeof(GpuLighting) == 96u + static_cast<usize>(k_max_lights) * sizeof(GpuLight));
 static_assert(sizeof(DebugPushConstants) == 96u);
 constexpr auto k_required_push_constant_bytes =
     std::max(sizeof(MeshPushConstants), sizeof(DebugPushConstants));
+
+[[nodiscard]] auto safe_normalize(const Vec3 value, const Vec3 fallback) noexcept -> Vec3
+{
+    const auto length_squared = glm::dot(value, value);
+    if (length_squared <= 1.0e-12f)
+    {
+        return glm::normalize(fallback);
+    }
+    return value * glm::inversesqrt(length_squared);
+}
 
 [[nodiscard]] auto material_base_color_texture_index(const Material& material) noexcept -> u32
 {
@@ -131,10 +176,12 @@ constexpr auto k_required_push_constant_bytes =
 
 auto to_gpu_material(
     const Material& material,
+    const MeshRenderMask& mask,
     const MeshDebugConfig& debug,
     const ObjectId object_id,
     const f32 time,
-    const Vec3 camera_position
+    const Vec3 camera_position,
+    const Vec3 camera_forward
 ) noexcept -> GpuMaterial
 {
     auto debug_mode = debug.mode;
@@ -159,6 +206,13 @@ auto to_gpu_material(
                 0.0f,
                 0.0f,
             },
+        .render_params =
+            Vec4{
+                mask.light_receiver ? 1.0f : 0.0f,
+                mask.shadow_consumer ? 1.0f : 0.0f,
+                mask.visible_to_camera ? 1.0f : 0.0f,
+                mask.shadow_producer ? 1.0f : 0.0f,
+            },
         .debug_color = to_vec4(debug.color),
         .debug_params =
             Vec4{
@@ -175,7 +229,150 @@ auto to_gpu_material(
                 0.0f,
             },
         .camera_position = Vec4{camera_position, 1.0f},
+        .camera_forward = Vec4{camera_forward, 0.0f},
     };
+}
+
+[[nodiscard]] auto spot_angle_scale(const LightConfig& light) noexcept -> f32
+{
+    const auto inner = std::clamp(light.inner_cone_angle, 0.0f, std::numbers::pi_v<f32> * 0.49f);
+    const auto outer =
+        std::clamp(light.outer_cone_angle, inner + 0.001f, std::numbers::pi_v<f32> * 0.5f);
+    return 1.0f / std::max(0.001f, std::cos(inner) - std::cos(outer));
+}
+
+[[nodiscard]] auto spot_angle_offset(const LightConfig& light) noexcept -> f32
+{
+    const auto inner = std::clamp(light.inner_cone_angle, 0.0f, std::numbers::pi_v<f32> * 0.49f);
+    const auto outer =
+        std::clamp(light.outer_cone_angle, inner + 0.001f, std::numbers::pi_v<f32> * 0.5f);
+    return -std::cos(outer) * spot_angle_scale(light);
+}
+
+[[nodiscard]] auto to_gpu_light(const LightConfig& light, const bool casts_active_shadow) noexcept
+    -> GpuLight
+{
+    const auto color = to_vec4(light.color);
+    return GpuLight{
+        .position_range = Vec4{light.position, std::max(0.0f, light.range)},
+        .direction_type =
+            Vec4{
+                safe_normalize(light.direction, -k_axis_z),
+                static_cast<f32>(light.type),
+            },
+        .color_intensity =
+            Vec4{
+                color.r,
+                color.g,
+                color.b,
+                std::max(0.0f, light.intensity),
+            },
+        .spot_shadow = Vec4{
+            spot_angle_scale(light),
+            spot_angle_offset(light),
+            casts_active_shadow ? 1.0f : 0.0f,
+            light.shadow.strength,
+        },
+    };
+}
+
+[[nodiscard]] auto shadow_supported_by_light(const LightConfig& light) noexcept -> bool
+{
+    return light.shadow.enabled
+           && (light.type == LightType::directional || light.type == LightType::spot);
+}
+
+[[nodiscard]] auto shadow_light_index(const std::vector<LightConfig>& lights) noexcept -> u32
+{
+    for (auto i = u32{0}; i < std::min(static_cast<u32>(lights.size()), k_max_lights); ++i)
+    {
+        if (shadow_supported_by_light(lights[i]))
+        {
+            return i;
+        }
+    }
+    return std::numeric_limits<u32>::max();
+}
+
+[[nodiscard]] auto light_view_matrix(const Vec3 position, const Vec3 direction) noexcept -> Mat4
+{
+    const auto forward = safe_normalize(direction, -k_axis_z);
+    const auto up_hint = std::abs(glm::dot(forward, k_axis_z)) > 0.92f ? k_axis_y : k_axis_z;
+    return glm::lookAt(position, position + forward, up_hint);
+}
+
+[[nodiscard]] auto light_projection_matrix(const LightConfig& light, const Camera& camera) noexcept
+    -> Mat4
+{
+    if (light.type == LightType::spot)
+    {
+        const auto outer =
+            std::clamp(light.outer_cone_angle, glm::radians(1.0f), std::numbers::pi_v<f32> * 0.49f);
+        const auto far_plane = light.shadow.far_plane > light.shadow.near_plane
+                                   ? light.shadow.far_plane
+                                   : std::max(light.shadow.near_plane + 0.1f, light.range);
+        auto projection = glm::perspective(2.0f * outer, 1.0f, light.shadow.near_plane, far_plane);
+        projection[1][1] *= -1.0f;
+        return projection;
+    }
+
+    const auto extent = std::max(0.1f, light.shadow.ortho_extent);
+    auto projection = glm::orthoRH_ZO(
+        -extent, extent, -extent, extent, light.shadow.near_plane, light.shadow.far_plane
+    );
+    projection[1][1] *= -1.0f;
+    static_cast<void>(camera);
+    return projection;
+}
+
+[[nodiscard]] auto
+light_view_projection_matrix(const LightConfig& light, const Camera& camera) noexcept -> Mat4
+{
+    if (light.type == LightType::spot)
+    {
+        return light_projection_matrix(light, camera)
+               * light_view_matrix(light.position, light.direction);
+    }
+
+    const auto direction = safe_normalize(light.direction, -k_axis_z);
+    const auto depth = std::max(light.shadow.far_plane - light.shadow.near_plane, 1.0f);
+    const auto target = camera.pivot;
+    const auto position = target - direction * (0.5f * depth);
+    return light_projection_matrix(light, camera) * light_view_matrix(position, direction);
+}
+
+[[nodiscard]] auto build_gpu_lighting(
+    const std::vector<LightConfig>& lights,
+    const Color ambient_light,
+    const Camera& camera,
+    const u32 shadow_index,
+    const u32 shadow_resolution
+) noexcept -> GpuLighting
+{
+    auto lighting = GpuLighting{
+        .ambient_light_count = Vec4{
+            ambient_light.r(),
+            ambient_light.g(),
+            ambient_light.b(),
+            static_cast<f32>(std::min(static_cast<u32>(lights.size()), k_max_lights)),
+        },
+    };
+    if (shadow_index < lights.size())
+    {
+        const auto& shadow_light = lights[shadow_index];
+        lighting.shadow_view_projection = light_view_projection_matrix(shadow_light, camera);
+        lighting.shadow_params = Vec4{
+            1.0f,
+            shadow_light.shadow.bias,
+            shadow_light.shadow.strength,
+            static_cast<f32>(std::max(1u, shadow_resolution)),
+        };
+    }
+    for (auto i = u32{0}; i < std::min(static_cast<u32>(lights.size()), k_max_lights); ++i)
+    {
+        lighting.lights[i] = to_gpu_light(lights[i], i == shadow_index);
+    }
+    return lighting;
 }
 
 auto check_vk_result(const VkResult result) -> void
@@ -279,11 +476,19 @@ auto DrawList::clear() -> void
 {
     mesh_commands_.clear();
     debug_segments_.clear();
+    lights_.clear();
+    ambient_light_ = Color{0.035f, 0.040f, 0.050f, 1.0f};
+}
+
+auto DrawList::set_ambient_light(const Color color) -> void
+{
+    ambient_light_ = color;
 }
 
 auto DrawList::draw_mesh(const MeshDrawConfig& config) -> void
 {
-    if (!config.mesh.valid() || config.debug.hidden)
+    if (!config.mesh.valid() || config.debug.hidden
+        || (!config.mask.visible_to_camera && !config.mask.shadow_producer))
     {
         return;
     }
@@ -293,6 +498,7 @@ auto DrawList::draw_mesh(const MeshDrawConfig& config) -> void
             .object_id = config.object_id,
             .transform = config.transform,
             .material = config.material,
+            .mask = config.mask,
             .debug = config.debug,
         }
     );
@@ -306,6 +512,7 @@ auto DrawList::draw_basic_mesh(const BasicMeshDrawConfig& config) -> void
             .object_id = config.object_id,
             .transform = config.transform,
             .material = Material{.base_color = config.color},
+            .mask = config.mask,
             .debug = config.debug,
         }
     );
@@ -412,6 +619,61 @@ auto DrawList::debug_sphere(
     );
 }
 
+auto DrawList::add_light(const LightConfig& config) -> void
+{
+    if (!config.enabled)
+    {
+        return;
+    }
+    lights_.push_back(config);
+}
+
+auto DrawList::directional_light(const DirectionalLightConfig& config) -> void
+{
+    add_light(
+        LightConfig{
+            .type = LightType::directional,
+            .direction = config.direction,
+            .color = config.color,
+            .intensity = config.intensity,
+            .shadow = config.shadow,
+            .enabled = config.enabled,
+        }
+    );
+}
+
+auto DrawList::radial_light(const RadialLightConfig& config) -> void
+{
+    add_light(
+        LightConfig{
+            .type = LightType::radial,
+            .position = config.position,
+            .color = config.color,
+            .intensity = config.intensity,
+            .range = config.range,
+            .enabled = config.enabled,
+        }
+    );
+}
+
+auto DrawList::spot_light(const SpotLightConfig& config) -> void
+{
+    add_light(
+        LightConfig{
+            .type = LightType::spot,
+            .position = config.position,
+            .direction = config.direction,
+            .color = config.color,
+            .intensity = config.intensity,
+            .range = config.range,
+            .inner_cone_angle = config.inner_cone_angle,
+            .outer_cone_angle = config.outer_cone_angle,
+            .shadow = config.shadow,
+            .enabled = config.enabled,
+        }
+    );
+}
+
 auto DrawList::mesh_commands() const noexcept -> const std::vector<MeshDrawCommand>&
 {
     return mesh_commands_;
@@ -420,6 +682,16 @@ auto DrawList::mesh_commands() const noexcept -> const std::vector<MeshDrawComma
 auto DrawList::debug_segments() const noexcept -> const std::vector<DebugSegment>&
 {
     return debug_segments_;
+}
+
+auto DrawList::lights() const noexcept -> const std::vector<LightConfig>&
+{
+    return lights_;
+}
+
+auto DrawList::ambient_light() const noexcept -> Color
+{
+    return ambient_light_;
 }
 
 struct Runtime::Impl
@@ -454,13 +726,18 @@ struct Runtime::Impl
     std::vector<VkDescriptorSet> mesh_descriptor_sets;
     VkPipelineLayout mesh_pipeline_layout{VK_NULL_HANDLE};
     VkPipeline mesh_pipeline{VK_NULL_HANDLE};
+    VkPipelineLayout shadow_pipeline_layout{VK_NULL_HANDLE};
+    VkPipeline shadow_pipeline{VK_NULL_HANDLE};
     VkPipelineLayout debug_pipeline_layout{VK_NULL_HANDLE};
     VkPipeline debug_pipeline{VK_NULL_HANDLE};
+    ShadowMap shadow_map{};
     std::vector<MeshResource> meshes;
     std::vector<TextureResource> textures;
     std::vector<Buffer> debug_segment_buffers;
     std::vector<Buffer> mesh_material_buffers;
+    std::vector<Buffer> mesh_lighting_buffers;
     std::vector<GpuMaterial> mesh_material_upload;
+    GpuLighting mesh_lighting_upload{};
     DrawList draw_list{};
     InputState input{};
     std::filesystem::path pending_screenshot;
@@ -477,6 +754,8 @@ struct Runtime::Impl
     auto setup_imgui() -> void;
     auto create_pipelines() -> void;
     auto destroy_pipelines() noexcept -> void;
+    auto create_shadow_map() -> void;
+    auto destroy_shadow_map() noexcept -> void;
     auto destroy_depth_attachments() noexcept -> void;
     auto install_depth_rendering() -> void;
     [[nodiscard]] auto create_depth_attachment(u32 width, u32 height) -> DepthAttachment;
@@ -497,14 +776,18 @@ struct Runtime::Impl
         -> TextureHandle;
     auto ensure_debug_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_mesh_material_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&;
+    auto ensure_mesh_lighting_buffer(u32 frame_index) -> Buffer&;
     auto update_mesh_material_descriptor(u32 frame_index, const Buffer& buffer) -> void;
+    auto update_mesh_lighting_descriptor(u32 frame_index, const Buffer& buffer) -> void;
     auto update_mesh_texture_descriptors() -> void;
+    auto update_mesh_shadow_descriptors() -> void;
     auto create_mesh_resource(const MeshData& mesh) -> MeshResource;
     auto upload_mesh(const MeshData& mesh) -> MeshHandle;
     auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
     auto render_frame(
         VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index, ImDrawData* draw_data
     ) -> void;
+    auto draw_shadow_map(VkCommandBuffer command_buffer) -> void;
     auto draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index) -> void;
     auto draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index) -> void;
     auto draw_runtime_ui() -> void;
@@ -874,6 +1157,30 @@ auto Runtime::Impl::ensure_mesh_material_buffer(const u32 frame_index, const VkD
     return buffer;
 }
 
+auto Runtime::Impl::ensure_mesh_lighting_buffer(const u32 frame_index) -> Buffer&
+{
+    if (mesh_lighting_buffers.size() < window_data.ImageCount)
+    {
+        mesh_lighting_buffers.resize(window_data.ImageCount);
+    }
+    auto& buffer = mesh_lighting_buffers.at(frame_index);
+    if (buffer.capacity >= sizeof(GpuLighting) && buffer.handle != VK_NULL_HANDLE)
+    {
+        return buffer;
+    }
+
+    check_vk_result(vkDeviceWaitIdle(device));
+    destroy_buffer(buffer);
+    buffer = create_buffer(
+        sizeof(GpuLighting),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        true,
+        VMA_MEMORY_USAGE_AUTO_PREFER_HOST
+    );
+    update_mesh_lighting_descriptor(frame_index, buffer);
+    return buffer;
+}
+
 auto Runtime::Impl::update_mesh_material_descriptor(const u32 frame_index, const Buffer& buffer)
     -> void
 {
@@ -891,6 +1198,29 @@ auto Runtime::Impl::update_mesh_material_descriptor(const u32 frame_index, const
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = mesh_descriptor_sets.at(frame_index);
     write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &buffer_info;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+auto Runtime::Impl::update_mesh_lighting_descriptor(const u32 frame_index, const Buffer& buffer)
+    -> void
+{
+    if (mesh_descriptor_sets.empty())
+    {
+        throw std::runtime_error("mesh lighting descriptor sets are not initialized");
+    }
+
+    const auto buffer_info = VkDescriptorBufferInfo{
+        .buffer = buffer.handle,
+        .offset = 0,
+        .range = buffer.capacity,
+    };
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = mesh_descriptor_sets.at(frame_index);
+    write.dstBinding = 2;
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.pBufferInfo = &buffer_info;
@@ -936,6 +1266,31 @@ auto Runtime::Impl::update_mesh_texture_descriptors() -> void
         write.descriptorCount = k_max_material_textures;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.pImageInfo = image_infos.data();
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
+}
+
+auto Runtime::Impl::update_mesh_shadow_descriptors() -> void
+{
+    if (mesh_descriptor_sets.empty() || shadow_map.view == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    const auto image_info = VkDescriptorImageInfo{
+        .sampler = shadow_map.sampler,
+        .imageView = shadow_map.view,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+    };
+    for (const auto descriptor_set : mesh_descriptor_sets)
+    {
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = descriptor_set;
+        write.dstBinding = 3;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &image_info;
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }
 }
@@ -1016,6 +1371,132 @@ auto Runtime::Impl::replace_mesh(const MeshHandle handle, const MeshData& mesh) 
     destroy_buffer(old.vertices);
     destroy_buffer(old.indices);
     return handle;
+}
+
+auto Runtime::Impl::create_shadow_map() -> void
+{
+    destroy_shadow_map();
+
+    const auto resolution = std::max(256u, config.shadow_map_resolution);
+    shadow_map.resolution = resolution;
+    shadow_map.format =
+        depth_format == VK_FORMAT_UNDEFINED ? find_depth_format(physical_device) : depth_format;
+
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = shadow_map.format;
+    image_info.extent = VkExtent3D{.width = resolution, .height = resolution, .depth = 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo allocation_info{};
+    allocation_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    check_vk_result(vmaCreateImage(
+        vma_allocator,
+        &image_info,
+        &allocation_info,
+        &shadow_map.image,
+        &shadow_map.allocation,
+        nullptr
+    ));
+
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = shadow_map.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = shadow_map.format;
+    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    view_info.subresourceRange.baseMipLevel = 0;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.baseArrayLayer = 0;
+    view_info.subresourceRange.layerCount = 1;
+    check_vk_result(vkCreateImageView(device, &view_info, allocation_callbacks, &shadow_map.view));
+
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    sampler_info.minLod = 0.0f;
+    sampler_info.maxLod = 0.0f;
+    sampler_info.maxAnisotropy = 1.0f;
+    check_vk_result(
+        vkCreateSampler(device, &sampler_info, allocation_callbacks, &shadow_map.sampler)
+    );
+
+    VkAttachmentDescription depth_attachment{};
+    depth_attachment.format = shadow_map.format;
+    depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+    VkAttachmentReference depth_reference{};
+    depth_reference.attachment = 0;
+    depth_reference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.pDepthStencilAttachment = &depth_reference;
+
+    VkRenderPassCreateInfo render_pass_info{};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_pass_info.attachmentCount = 1;
+    render_pass_info.pAttachments = &depth_attachment;
+    render_pass_info.subpassCount = 1;
+    render_pass_info.pSubpasses = &subpass;
+    check_vk_result(
+        vkCreateRenderPass(device, &render_pass_info, allocation_callbacks, &shadow_map.render_pass)
+    );
+
+    VkFramebufferCreateInfo framebuffer_info{};
+    framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebuffer_info.renderPass = shadow_map.render_pass;
+    framebuffer_info.attachmentCount = 1;
+    framebuffer_info.pAttachments = &shadow_map.view;
+    framebuffer_info.width = resolution;
+    framebuffer_info.height = resolution;
+    framebuffer_info.layers = 1;
+    check_vk_result(vkCreateFramebuffer(
+        device, &framebuffer_info, allocation_callbacks, &shadow_map.framebuffer
+    ));
+}
+
+auto Runtime::Impl::destroy_shadow_map() noexcept -> void
+{
+    if (shadow_map.framebuffer != VK_NULL_HANDLE)
+    {
+        vkDestroyFramebuffer(device, shadow_map.framebuffer, allocation_callbacks);
+    }
+    if (shadow_map.render_pass != VK_NULL_HANDLE)
+    {
+        vkDestroyRenderPass(device, shadow_map.render_pass, allocation_callbacks);
+    }
+    if (shadow_map.sampler != VK_NULL_HANDLE)
+    {
+        vkDestroySampler(device, shadow_map.sampler, allocation_callbacks);
+    }
+    if (shadow_map.view != VK_NULL_HANDLE)
+    {
+        vkDestroyImageView(device, shadow_map.view, allocation_callbacks);
+    }
+    if (shadow_map.image != VK_NULL_HANDLE)
+    {
+        vmaDestroyImage(vma_allocator, shadow_map.image, shadow_map.allocation);
+    }
+    shadow_map = {};
 }
 
 auto Runtime::Impl::create_depth_attachment(const u32 width, const u32 height) -> DepthAttachment
@@ -1257,7 +1738,8 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
     {
         throw std::runtime_error("physical device maxPushConstantsSize is too small for ds_vk");
     }
-    if (physical_device_properties.limits.maxPerStageDescriptorSamplers < k_max_material_textures)
+    if (physical_device_properties.limits.maxPerStageDescriptorSamplers
+        < k_max_material_textures + 1u)
     {
         throw std::runtime_error(
             "physical device maxPerStageDescriptorSamplers is too small for ds_vk"
@@ -1500,6 +1982,7 @@ auto Runtime::Impl::create_pipelines() -> void
 
     const auto mesh_vert = create_shader_module(device, shader_dir / "mesh.vert.spv");
     const auto mesh_frag = create_shader_module(device, shader_dir / "mesh.frag.spv");
+    const auto shadow_vert = create_shader_module(device, shader_dir / "shadow.vert.spv");
     const auto debug_vert = create_shader_module(device, shader_dir / "debug_line.vert.spv");
     const auto debug_frag = create_shader_module(device, shader_dir / "debug_line.frag.spv");
 
@@ -1507,6 +1990,7 @@ auto Runtime::Impl::create_pipelines() -> void
     {
         vkDestroyShaderModule(device, mesh_vert, allocation_callbacks);
         vkDestroyShaderModule(device, mesh_frag, allocation_callbacks);
+        vkDestroyShaderModule(device, shadow_vert, allocation_callbacks);
         vkDestroyShaderModule(device, debug_vert, allocation_callbacks);
         vkDestroyShaderModule(device, debug_frag, allocation_callbacks);
     };
@@ -1528,7 +2012,20 @@ auto Runtime::Impl::create_pipelines() -> void
     texture_binding.descriptorCount = k_max_material_textures;
     texture_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    const auto mesh_descriptor_bindings = std::array{material_binding, texture_binding};
+    VkDescriptorSetLayoutBinding lighting_binding{};
+    lighting_binding.binding = 2;
+    lighting_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    lighting_binding.descriptorCount = 1;
+    lighting_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutBinding shadow_binding{};
+    shadow_binding.binding = 3;
+    shadow_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    shadow_binding.descriptorCount = 1;
+    shadow_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    const auto mesh_descriptor_bindings =
+        std::array{material_binding, texture_binding, lighting_binding, shadow_binding};
     VkDescriptorSetLayoutCreateInfo mesh_descriptor_layout_info{};
     mesh_descriptor_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     mesh_descriptor_layout_info.bindingCount = static_cast<u32>(mesh_descriptor_bindings.size());
@@ -1540,11 +2037,12 @@ auto Runtime::Impl::create_pipelines() -> void
     const auto descriptor_pool_sizes = std::array{
         VkDescriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = std::max(1u, window_data.ImageCount),
+            .descriptorCount = std::max(1u, window_data.ImageCount) * 2u,
         },
         VkDescriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = std::max(1u, window_data.ImageCount) * k_max_material_textures,
+            .descriptorCount =
+                std::max(1u, window_data.ImageCount) * (k_max_material_textures + 1u),
         },
     };
     VkDescriptorPoolCreateInfo mesh_descriptor_pool_info{};
@@ -1575,8 +2073,13 @@ auto Runtime::Impl::create_pipelines() -> void
         {
             update_mesh_material_descriptor(i, mesh_material_buffers[i]);
         }
+        if (i < mesh_lighting_buffers.size() && mesh_lighting_buffers[i].handle != VK_NULL_HANDLE)
+        {
+            update_mesh_lighting_descriptor(i, mesh_lighting_buffers[i]);
+        }
     }
     update_mesh_texture_descriptors();
+    update_mesh_shadow_descriptors();
 
     VkPipelineLayoutCreateInfo mesh_layout_info{};
     mesh_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1586,6 +2089,14 @@ auto Runtime::Impl::create_pipelines() -> void
     mesh_layout_info.pPushConstantRanges = &mesh_push_range;
     check_vk_result(vkCreatePipelineLayout(
         device, &mesh_layout_info, allocation_callbacks, &mesh_pipeline_layout
+    ));
+
+    VkPipelineLayoutCreateInfo shadow_layout_info{};
+    shadow_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    shadow_layout_info.pushConstantRangeCount = 1;
+    shadow_layout_info.pPushConstantRanges = &mesh_push_range;
+    check_vk_result(vkCreatePipelineLayout(
+        device, &shadow_layout_info, allocation_callbacks, &shadow_pipeline_layout
     ));
 
     VkPushConstantRange debug_push_range{};
@@ -1712,6 +2223,44 @@ auto Runtime::Impl::create_pipelines() -> void
         device, pipeline_cache, 1, &mesh_pipeline_info, allocation_callbacks, &mesh_pipeline
     ));
 
+    const auto shadow_attributes = std::array{
+        VkVertexInputAttributeDescription{
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(Vertex, position),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo shadow_vertex_input{};
+    shadow_vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    shadow_vertex_input.vertexBindingDescriptionCount = 1;
+    shadow_vertex_input.pVertexBindingDescriptions = &mesh_binding;
+    shadow_vertex_input.vertexAttributeDescriptionCount =
+        static_cast<u32>(shadow_attributes.size());
+    shadow_vertex_input.pVertexAttributeDescriptions = shadow_attributes.data();
+
+    auto shadow_rasterization = rasterization;
+    shadow_rasterization.depthBiasEnable = VK_TRUE;
+    shadow_rasterization.depthBiasConstantFactor = 1.25f;
+    shadow_rasterization.depthBiasSlopeFactor = 1.75f;
+    auto shadow_depth_state = depth_state;
+    shadow_depth_state.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    VkPipelineColorBlendStateCreateInfo shadow_blend_state{};
+    shadow_blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    const auto shadow_stages = std::array{make_stage(shadow_vert, VK_SHADER_STAGE_VERTEX_BIT)};
+    VkGraphicsPipelineCreateInfo shadow_pipeline_info = mesh_pipeline_info;
+    shadow_pipeline_info.stageCount = static_cast<u32>(shadow_stages.size());
+    shadow_pipeline_info.pStages = shadow_stages.data();
+    shadow_pipeline_info.pVertexInputState = &shadow_vertex_input;
+    shadow_pipeline_info.pRasterizationState = &shadow_rasterization;
+    shadow_pipeline_info.pDepthStencilState = &shadow_depth_state;
+    shadow_pipeline_info.pColorBlendState = &shadow_blend_state;
+    shadow_pipeline_info.layout = shadow_pipeline_layout;
+    shadow_pipeline_info.renderPass = shadow_map.render_pass;
+    check_vk_result(vkCreateGraphicsPipelines(
+        device, pipeline_cache, 1, &shadow_pipeline_info, allocation_callbacks, &shadow_pipeline
+    ));
+
     const auto debug_binding = VkVertexInputBindingDescription{
         .binding = 0,
         .stride = sizeof(DebugSegment),
@@ -1799,6 +2348,16 @@ auto Runtime::Impl::destroy_pipelines() noexcept -> void
         vkDestroyPipelineLayout(device, debug_pipeline_layout, allocation_callbacks);
         debug_pipeline_layout = VK_NULL_HANDLE;
     }
+    if (shadow_pipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, shadow_pipeline, allocation_callbacks);
+        shadow_pipeline = VK_NULL_HANDLE;
+    }
+    if (shadow_pipeline_layout != VK_NULL_HANDLE)
+    {
+        vkDestroyPipelineLayout(device, shadow_pipeline_layout, allocation_callbacks);
+        shadow_pipeline_layout = VK_NULL_HANDLE;
+    }
     if (mesh_pipeline != VK_NULL_HANDLE)
     {
         vkDestroyPipeline(device, mesh_pipeline, allocation_callbacks);
@@ -1822,6 +2381,102 @@ auto Runtime::Impl::destroy_pipelines() noexcept -> void
     }
 }
 
+auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> void
+{
+    const auto& mesh_commands = draw_list.mesh_commands();
+    const auto& lights = draw_list.lights();
+    const auto shadow_index = shadow_light_index(lights);
+    if (mesh_commands.empty() || shadow_index >= lights.size() || shadow_pipeline == VK_NULL_HANDLE
+        || shadow_map.framebuffer == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    const auto shadow_view_projection = light_view_projection_matrix(lights[shadow_index], camera);
+    const auto clear =
+        VkClearValue{.depthStencil = VkClearDepthStencilValue{.depth = 1.0f, .stencil = 0}};
+    VkRenderPassBeginInfo render_pass_begin{};
+    render_pass_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    render_pass_begin.renderPass = shadow_map.render_pass;
+    render_pass_begin.framebuffer = shadow_map.framebuffer;
+    render_pass_begin.renderArea = VkRect2D{
+        .offset = VkOffset2D{.x = 0, .y = 0},
+        .extent = VkExtent2D{.width = shadow_map.resolution, .height = shadow_map.resolution},
+    };
+    render_pass_begin.clearValueCount = 1;
+    render_pass_begin.pClearValues = &clear;
+    vkCmdBeginRenderPass(command_buffer, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+
+    const auto viewport = VkViewport{
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = static_cast<f32>(shadow_map.resolution),
+        .height = static_cast<f32>(shadow_map.resolution),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    const auto scissor = VkRect2D{
+        .offset = VkOffset2D{.x = 0, .y = 0},
+        .extent = VkExtent2D{.width = shadow_map.resolution, .height = shadow_map.resolution},
+    };
+    vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+    vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+
+    for (const auto& command : mesh_commands)
+    {
+        if (!command.mask.shadow_producer || !command.mesh.valid()
+            || command.mesh.index >= meshes.size())
+        {
+            continue;
+        }
+        const auto& mesh = meshes[command.mesh.index];
+        const auto offsets = std::array<VkDeviceSize, 1>{0};
+        const auto vertex_buffers = std::array{mesh.vertices.handle};
+        vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers.data(), offsets.data());
+        vkCmdBindIndexBuffer(command_buffer, mesh.indices.handle, 0, VK_INDEX_TYPE_UINT32);
+        const auto push = MeshPushConstants{
+            .view_projection = shadow_view_projection,
+            .model = command.transform.matrix(),
+        };
+        vkCmdPushConstants(
+            command_buffer,
+            shadow_pipeline_layout,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(push),
+            &push
+        );
+        vkCmdDrawIndexed(command_buffer, mesh.index_count, 1, 0, 0, 0);
+    }
+    vkCmdEndRenderPass(command_buffer);
+
+    VkImageMemoryBarrier read_barrier{};
+    read_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    read_barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    read_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    read_barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    read_barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    read_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    read_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    read_barrier.image = shadow_map.image;
+    read_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    read_barrier.subresourceRange.levelCount = 1;
+    read_barrier.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(
+        command_buffer,
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &read_barrier
+    );
+}
+
 auto Runtime::Impl::draw_meshes(
     const VkCommandBuffer command_buffer, const VkExtent2D extent, const u32 frame_index
 ) -> void
@@ -1833,12 +2488,27 @@ auto Runtime::Impl::draw_meshes(
 
     const auto& mesh_commands = draw_list.mesh_commands();
     const auto camera_position = camera.position();
+    const auto camera_forward = safe_normalize(camera.pivot - camera_position, -k_axis_y);
+    const auto& lights = draw_list.lights();
+    const auto active_shadow_index = shadow_light_index(lights);
+    mesh_lighting_upload = build_gpu_lighting(
+        lights, draw_list.ambient_light(), camera, active_shadow_index, shadow_map.resolution
+    );
+    auto& lighting_buffer = ensure_mesh_lighting_buffer(frame_index);
+    std::memcpy(lighting_buffer.mapped, &mesh_lighting_upload, sizeof(mesh_lighting_upload));
+
     mesh_material_upload.clear();
     mesh_material_upload.reserve(mesh_commands.size());
     for (const auto& command : mesh_commands)
     {
         mesh_material_upload.push_back(to_gpu_material(
-            command.material, command.debug, command.object_id, elapsed_seconds, camera_position
+            command.material,
+            command.mask,
+            command.debug,
+            command.object_id,
+            elapsed_seconds,
+            camera_position,
+            camera_forward
         ));
     }
     const auto material_byte_count = vector_byte_size(mesh_material_upload);
@@ -1864,7 +2534,8 @@ auto Runtime::Impl::draw_meshes(
     for (auto command_index = usize{0}; command_index < mesh_commands.size(); ++command_index)
     {
         const auto& command = mesh_commands[command_index];
-        if (!command.mesh.valid() || command.mesh.index >= meshes.size())
+        if (!command.mask.visible_to_camera || !command.mesh.valid()
+            || command.mesh.index >= meshes.size())
         {
             continue;
         }
@@ -1986,10 +2657,11 @@ auto Runtime::Impl::draw_runtime_ui() -> void
 
     ImGui::DragFloat3("Pivot", &camera.pivot.x, 0.01f);
     ImGui::Text(
-        "Frame %.2f ms | draw %u | debug %u",
+        "Frame %.2f ms | draw %u | debug %u | lights %u",
         static_cast<double>(stats.last_frame_ms),
         stats.mesh_draws,
-        stats.debug_segments
+        stats.debug_segments,
+        stats.lights
     );
     ImGui::Text(
         "Descriptor indexing: %s",
@@ -2362,6 +3034,7 @@ auto Runtime::Impl::initialize() -> void
     auto height = 0;
     SDL_GetWindowSizeInPixels(window, &width, &height);
     setup_vulkan_window(surface, width, height);
+    create_shadow_map();
     create_default_texture();
     setup_imgui();
     create_pipelines();
@@ -2388,6 +3061,13 @@ auto Runtime::Impl::shutdown() noexcept -> void
     mesh_material_buffers.clear();
     mesh_material_upload.clear();
 
+    for (auto& buffer : mesh_lighting_buffers)
+    {
+        destroy_buffer(buffer);
+    }
+    mesh_lighting_buffers.clear();
+    mesh_lighting_upload = {};
+
     for (auto& mesh : meshes)
     {
         destroy_buffer(mesh.vertices);
@@ -2396,6 +3076,7 @@ auto Runtime::Impl::shutdown() noexcept -> void
     meshes.clear();
 
     destroy_pipelines();
+    destroy_shadow_map();
 
     for (auto& texture : textures)
     {
@@ -2591,6 +3272,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
         render_pass_info.clearValueCount = static_cast<u32>(clear_values.size());
         render_pass_info.pClearValues = clear_values.data();
         const auto render_begin = std::chrono::steady_clock::now();
+        draw_shadow_map(frame->CommandBuffer);
         vkCmdBeginRenderPass(frame->CommandBuffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
         render_frame(
             frame->CommandBuffer,
@@ -2641,6 +3323,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
                 std::chrono::duration<f32, std::milli>(render_end - render_begin).count(),
             .mesh_draws = static_cast<u32>(draw_list.mesh_commands().size()),
             .debug_segments = static_cast<u32>(draw_list.debug_segments().size()),
+            .lights = static_cast<u32>(draw_list.lights().size()),
         };
 
         ++frame_counter;

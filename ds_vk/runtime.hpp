@@ -69,6 +69,7 @@ enum class MeshDebugMode : u8
     scalar_heatmap = 3,
     normal = 4,
     object_id = 5,
+    camera_depth = 6,
 };
 
 struct MeshDebugConfig
@@ -81,12 +82,21 @@ struct MeshDebugConfig
     bool hidden{};
 };
 
+struct MeshRenderMask
+{
+    bool visible_to_camera{true};
+    bool shadow_producer{true};
+    bool shadow_consumer{true};
+    bool light_receiver{true};
+};
+
 struct MeshDrawConfig
 {
     MeshHandle mesh{};
     ObjectId object_id{};
     Transform transform{};
     Material material{};
+    MeshRenderMask mask{};
     MeshDebugConfig debug{};
 };
 
@@ -96,6 +106,7 @@ struct BasicMeshDrawConfig
     ObjectId object_id{};
     Transform transform{};
     Color color{Color::white};
+    MeshRenderMask mask{};
     MeshDebugConfig debug{};
 };
 
@@ -105,7 +116,70 @@ struct MeshDrawCommand
     ObjectId object_id{};
     Transform transform{};
     Material material{};
+    MeshRenderMask mask{};
     MeshDebugConfig debug{};
+};
+
+enum class LightType : u8
+{
+    directional = 0,
+    radial = 1,
+    spot = 2,
+};
+
+struct LightShadowConfig
+{
+    bool enabled{};
+    f32 bias{0.0025f};
+    f32 strength{0.70f};
+    f32 near_plane{0.05f};
+    f32 far_plane{28.0f};
+    f32 ortho_extent{7.0f};
+};
+
+struct LightConfig
+{
+    LightType type{LightType::directional};
+    Vec3 position{0.0f, 0.0f, 2.0f};
+    Vec3 direction{-0.45f, -0.35f, -0.82f};
+    Color color{Color::white};
+    f32 intensity{1.0f};
+    f32 range{6.0f};
+    f32 inner_cone_angle{glm::radians(12.0f)};
+    f32 outer_cone_angle{glm::radians(24.0f)};
+    LightShadowConfig shadow{};
+    bool enabled{true};
+};
+
+struct DirectionalLightConfig
+{
+    Vec3 direction{-0.45f, -0.35f, -0.82f};
+    Color color{Color::white};
+    f32 intensity{1.0f};
+    LightShadowConfig shadow{};
+    bool enabled{true};
+};
+
+struct RadialLightConfig
+{
+    Vec3 position{0.0f, 0.0f, 2.0f};
+    Color color{Color::white};
+    f32 intensity{8.0f};
+    f32 range{5.0f};
+    bool enabled{true};
+};
+
+struct SpotLightConfig
+{
+    Vec3 position{0.0f, 0.0f, 3.0f};
+    Vec3 direction{0.0f, 0.0f, -1.0f};
+    Color color{Color::white};
+    f32 intensity{18.0f};
+    f32 range{7.0f};
+    f32 inner_cone_angle{glm::radians(12.0f)};
+    f32 outer_cone_angle{glm::radians(24.0f)};
+    LightShadowConfig shadow{};
+    bool enabled{true};
 };
 
 struct DebugLineConfig
@@ -146,6 +220,7 @@ class DrawList
 {
   public:
     auto clear() -> void;
+    auto set_ambient_light(Color color) -> void;
     auto draw_mesh(const MeshDrawConfig& config) -> void;
     auto draw_basic_mesh(const BasicMeshDrawConfig& config) -> void;
     auto draw_basic_mesh(
@@ -158,13 +233,21 @@ class DrawList
     auto debug_sphere(const DebugSphereConfig& config) -> void;
     auto debug_sphere(Vec3 center, f32 radius, Color color, u32 segments = 32u, f32 width = 0.010f)
         -> void;
+    auto add_light(const LightConfig& config) -> void;
+    auto directional_light(const DirectionalLightConfig& config) -> void;
+    auto radial_light(const RadialLightConfig& config) -> void;
+    auto spot_light(const SpotLightConfig& config) -> void;
 
     [[nodiscard]] auto mesh_commands() const noexcept -> const std::vector<MeshDrawCommand>&;
     [[nodiscard]] auto debug_segments() const noexcept -> const std::vector<DebugSegment>&;
+    [[nodiscard]] auto lights() const noexcept -> const std::vector<LightConfig>&;
+    [[nodiscard]] auto ambient_light() const noexcept -> Color;
 
   private:
     std::vector<MeshDrawCommand> mesh_commands_{};
     std::vector<DebugSegment> debug_segments_{};
+    std::vector<LightConfig> lights_{};
+    Color ambient_light_{0.035f, 0.040f, 0.050f, 1.0f};
 };
 
 struct RuntimeStats
@@ -175,6 +258,7 @@ struct RuntimeStats
     f32 last_render_ms{};
     u32 mesh_draws{};
     u32 debug_segments{};
+    u32 lights{};
 };
 
 struct RuntimeConfig
@@ -189,6 +273,7 @@ struct RuntimeConfig
     bool transparent_screenshot{};
     bool enable_validation{true};
     Color clear_color{0.035f, 0.045f, 0.055f, 1.0f};
+    u32 shadow_map_resolution{2048};
 };
 
 struct TextureLoadConfig

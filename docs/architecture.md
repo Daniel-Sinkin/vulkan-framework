@@ -33,8 +33,10 @@ is not a renderer abstraction layer, game engine, or cross-API project.
    the runtime core.
 5. Built-in camera UI and the app's optional `draw_ui(FrameContext&)` build
    ImGui draw data.
-6. Built-in pipelines render meshes, debug segments, and ImGui.
-7. Optional screenshot copy reads the swapchain into a VMA buffer and writes PNG.
+6. If a supported shadow-casting light exists, the runtime renders shadow
+   producers into a depth-only shadow map from that light's view.
+7. Built-in pipelines render meshes, debug segments, and ImGui.
+8. Optional screenshot copy reads the swapchain into a VMA buffer and writes PNG.
 
 ## Current Shader Interface
 
@@ -45,21 +47,37 @@ is not a renderer abstraction layer, game engine, or cross-API project.
 - Mesh draws use a 128-byte vertex-stage push block: view-projection and model
   matrices. The vertex shader derives world position and a normal matrix from
   the model matrix.
-- The first mesh pipeline binds a per-frame material storage buffer. The first
-  mesh fragment shader uses a fixed-light Cook-Torrance metallic/roughness
-  model and computes view direction from the actual camera position stored in
-  the material buffer. Each non-instanced draw passes its material index through
-  `firstInstance`/`gl_InstanceIndex`. Materials currently carry base color,
-  emissive color, metallic, roughness, ambient occlusion, and an optional
-  base-color texture handle.
-- Material textures are bound through a fixed 16-slot combined-image-sampler
+- The first mesh pipeline binds a per-frame material storage buffer and a
+  per-frame lighting storage buffer. The mesh fragment shader uses
+  Cook-Torrance metallic/roughness lighting from explicit directional, radial,
+  and spot lights; view direction comes from the actual camera position stored
+  in the material buffer. Each non-instanced draw passes its material index
+  through `firstInstance`/`gl_InstanceIndex`.
+- Materials currently carry base color, emissive color, metallic, roughness,
+  ambient occlusion, and an optional base-color texture handle. Emission only
+  contributes to the emitting surface; it does not spawn lights.
+- Material textures are bound through a fixed 15-slot combined-image-sampler
   table. Slot 0 is a generated white fallback; app-loaded texture handles occupy
   later slots and materials opt into them with
-  `.textures = {.base_color = handle}`. The fixed size is deliberately matched
-  to the validated MoltenVK sampler limit before a later bindless pass.
+  `.textures = {.base_color = handle}`. The table is 15 rather than 16 because
+  the same shader also binds one shadow-map sampler, keeping the current layout
+  under the validated MoltenVK per-stage sampler limit before a later bindless
+  pass.
 - Mesh draw configs also carry an `ObjectId` and `MeshDebugConfig`. Hidden draws
   are culled before recording; selected/color-override/scalar-heatmap/normal/id
-  views are applied in the mesh fragment shader.
+  views are applied in the mesh fragment shader. `camera_depth` debug mode
+  renders visible mesh surfaces as grayscale linear camera-space depth using the
+  configured debug scalar range; this is the lightweight depth-buffer inspection
+  path before adding a true sampled-depth preview pass.
+- Mesh draw configs carry a `MeshRenderMask` with separate switches for camera
+  visibility, shadow production, shadow consumption, and light reception. A
+  draw can therefore be hidden from the camera while still casting a shadow, or
+  visible but unlit for debug/material inspection.
+- Shadow mapping currently supports one active shadow-casting directional or
+  spot light per frame. Directional lights use an orthographic light projection
+  centered around the camera pivot; spot lights use a square perspective
+  projection from the light. Radial light shadows need an omnidirectional cube
+  shadow map and are intentionally left for a separate pass.
 - Debug segments use a separate 96-byte push block and one per-frame mapped
   segment buffer.
 - `ds_vk::viz` builds visual helpers on top of that debug segment path: color
@@ -203,7 +221,7 @@ viz::draw_cross_marker(frame.draw, {
 ## Near-Term Roadmap
 
 - Descriptor indexing/bindless support path: feature-gated query/enablement
-  exists now; replace the fixed 16-slot material texture table once an app needs
+  exists now; replace the fixed 15-slot material texture table once an app needs
   larger texture/storage-buffer sets.
 - Pipeline cache and shader reload.
 - Instanced mesh buckets for repeated cube/sphere visualization.

@@ -31,6 +31,16 @@ constexpr auto k_selection_color = Color{1.0f, 0.0f, 0.85f, 0.86f};
     return std::filesystem::path{DS_VK_ASSET_DIR} / relative;
 }
 
+[[nodiscard]] auto normalized_or(const Vec3 value, const Vec3 fallback) noexcept -> Vec3
+{
+    const auto length_squared = glm::dot(value, value);
+    if (length_squared <= 1.0e-12f)
+    {
+        return glm::normalize(fallback);
+    }
+    return value * glm::inversesqrt(length_squared);
+}
+
 class BasicViewerApp final
 {
   public:
@@ -65,11 +75,14 @@ class BasicViewerApp final
         picker_.clear();
         register_pick_targets();
         handle_selection_click(frame);
+        configure_lighting(frame.draw);
+        const auto show_debug_overlays = !show_camera_depth_debug_;
 
         frame.draw.draw_mesh({
             .mesh = floor_mesh_,
             .object_id = object_ids_.floor,
             .material = materials_.floor,
+            .mask = {.shadow_producer = false},
             .debug = object_debug_config(object_ids_.floor),
         });
         frame.draw.draw_mesh({
@@ -83,7 +96,7 @@ class BasicViewerApp final
             .material = materials_.sphere,
             .debug = object_debug_config(object_ids_.sphere),
         });
-        if (show_sphere_wire_)
+        if (show_debug_overlays && show_sphere_wire_)
         {
             frame.draw.debug_sphere({
                 .center = sphere_position_,
@@ -100,8 +113,26 @@ class BasicViewerApp final
             .material = materials_.cube,
             .debug = object_debug_config(object_ids_.cube, hide_cube_),
         });
+        frame.draw.draw_mesh({
+            .mesh = cube_mesh_,
+            .object_id = object_ids_.column,
+            .transform = column_transform(),
+            .material = materials_.column,
+            .debug = object_debug_config(object_ids_.column),
+        });
+        frame.draw.draw_mesh({
+            .mesh = sphere_mesh_,
+            .object_id = object_ids_.small_sphere,
+            .transform =
+                Transform{
+                    .translation = small_sphere_position_,
+                    .scale = Vec3{0.36f},
+                },
+            .material = materials_.small_sphere,
+            .debug = object_debug_config(object_ids_.small_sphere),
+        });
 
-        if (show_debug_axes_)
+        if (show_debug_overlays && show_debug_axes_)
         {
             const auto& cfg = debug_axis_cfg_;
             frame.draw.debug_arrow({
@@ -120,7 +151,7 @@ class BasicViewerApp final
                 .color = cfg.color_z,
             });
         }
-        if (show_vector_field_)
+        if (show_debug_overlays && show_vector_field_)
         {
             viz::draw_vector_field(
                 frame.draw,
@@ -134,7 +165,7 @@ class BasicViewerApp final
                 }
             );
         }
-        if (show_floor_grid_)
+        if (show_debug_overlays && show_floor_grid_)
         {
             const auto& cfg = floor_grid_cfg_;
             const auto dx = cfg.half_extent * k_axis_x;
@@ -165,6 +196,10 @@ class BasicViewerApp final
                 draw_line(i);
             }
         }
+        if (show_debug_overlays && show_light_gizmos_)
+        {
+            draw_light_gizmos(frame.draw);
+        }
     }
 
     auto draw_ui(ds_vk::FrameContext& frame) -> void
@@ -179,8 +214,43 @@ class BasicViewerApp final
             ImGui::Checkbox("Floor grid", &show_floor_grid_);
             ImGui::Checkbox("Vector field", &show_vector_field_);
             ImGui::Checkbox("Sphere wire", &show_sphere_wire_);
-            ImGui::Checkbox("Normal debug", &show_normal_debug_);
+            if (ImGui::Checkbox("Normal debug", &show_normal_debug_) && show_normal_debug_)
+            {
+                show_camera_depth_debug_ = false;
+            }
+            if (ImGui::Checkbox("Camera depth debug", &show_camera_depth_debug_)
+                && show_camera_depth_debug_)
+            {
+                show_normal_debug_ = false;
+            }
+            ImGui::DragFloatRange2(
+                "Depth range",
+                &camera_depth_debug_cfg_.near_distance,
+                &camera_depth_debug_cfg_.far_distance,
+                0.05f,
+                0.0f,
+                30.0f,
+                "%.2f",
+                "%.2f"
+            );
             ImGui::Checkbox("Hide cube", &hide_cube_);
+            ImGui::Checkbox("Light gizmos", &show_light_gizmos_);
+            ImGui::Separator();
+            ImGui::ColorEdit3("Ambient", lights_.ambient.data());
+            ImGui::Checkbox("Directional light", &lights_.sun.enabled);
+            ImGui::DragFloat3("Sun direction", &lights_.sun.direction.x, 0.02f);
+            ImGui::SliderFloat("Sun intensity", &lights_.sun.intensity, 0.0f, 6.0f, "%.2f");
+            ImGui::SliderFloat("Shadow bias", &lights_.sun.shadow.bias, 0.0001f, 0.02f, "%.4f");
+            ImGui::SliderFloat("Shadow strength", &lights_.sun.shadow.strength, 0.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("Radial light", &lights_.radial.enabled);
+            ImGui::DragFloat3("Radial position", &lights_.radial.position.x, 0.03f);
+            ImGui::SliderFloat("Radial intensity", &lights_.radial.intensity, 0.0f, 30.0f, "%.2f");
+            ImGui::SliderFloat("Radial range", &lights_.radial.range, 0.5f, 10.0f, "%.2f");
+            ImGui::Checkbox("Spot light", &lights_.spot.enabled);
+            ImGui::DragFloat3("Spot position", &lights_.spot.position.x, 0.03f);
+            ImGui::DragFloat3("Spot direction", &lights_.spot.direction.x, 0.02f);
+            ImGui::SliderFloat("Spot intensity", &lights_.spot.intensity, 0.0f, 60.0f, "%.2f");
+            ImGui::SliderFloat("Spot range", &lights_.spot.range, 0.5f, 12.0f, "%.2f");
             ImGui::Separator();
             ImGui::DragFloat3("Sphere position", &sphere_position_.x, 0.025f);
             ImGui::SliderFloat("Sphere radius", &sphere_radius_, 0.1f, 2.0f, "%.2f");
@@ -220,6 +290,19 @@ class BasicViewerApp final
     auto set_normal_debug(const bool enabled) noexcept -> void
     {
         show_normal_debug_ = enabled;
+        if (enabled)
+        {
+            show_camera_depth_debug_ = false;
+        }
+    }
+
+    auto set_camera_depth_debug(const bool enabled) noexcept -> void
+    {
+        show_camera_depth_debug_ = enabled;
+        if (enabled)
+        {
+            show_normal_debug_ = false;
+        }
     }
 
   private:
@@ -233,6 +316,15 @@ class BasicViewerApp final
         -> MeshDebugConfig
     {
         auto debug = MeshDebugConfig{.hidden = hidden};
+        if (show_camera_depth_debug_ && !hidden)
+        {
+            const auto& cfg = camera_depth_debug_cfg_;
+            debug.mode = MeshDebugMode::camera_depth;
+            debug.scalar_range = {
+                cfg.near_distance, std::max(cfg.near_distance + 0.001f, cfg.far_distance)
+            };
+            return debug;
+        }
         if (show_normal_debug_ && !hidden)
         {
             debug.mode = MeshDebugMode::normal;
@@ -256,6 +348,56 @@ class BasicViewerApp final
         };
     }
 
+    [[nodiscard]] auto column_transform() const noexcept -> Transform
+    {
+        return Transform{
+            .translation = {1.35f, 1.25f, 0.68f},
+            .rotation = glm::angleAxis(glm::radians(-12.0f), k_axis_z),
+            .scale = {0.36f, 0.36f, 1.36f},
+        };
+    }
+
+    auto configure_lighting(DrawList& draw) const -> void
+    {
+        draw.set_ambient_light(lights_.ambient);
+        draw.directional_light(lights_.sun);
+        draw.radial_light(lights_.radial);
+        draw.spot_light(lights_.spot);
+    }
+
+    auto draw_light_gizmos(DrawList& draw) const -> void
+    {
+        if (lights_.sun.enabled)
+        {
+            const auto sun_dir = normalized_or(lights_.sun.direction, -k_axis_z);
+            draw.debug_arrow({
+                .origin = {-2.8f, -2.8f, 2.1f},
+                .vector = 0.9f * sun_dir,
+                .color = lights_.sun.color,
+                .width = 0.018f,
+            });
+        }
+        if (lights_.radial.enabled)
+        {
+            draw.debug_sphere({
+                .center = lights_.radial.position,
+                .radius = 0.08f,
+                .color = lights_.radial.color,
+                .segments = 12u,
+                .width = 0.012f,
+            });
+        }
+        if (lights_.spot.enabled)
+        {
+            draw.debug_arrow({
+                .origin = lights_.spot.position,
+                .vector = 0.65f * normalized_or(lights_.spot.direction, -k_axis_z),
+                .color = lights_.spot.color,
+                .width = 0.018f,
+            });
+        }
+    }
+
     auto register_pick_targets() -> void
     {
         picker_.add_sphere({
@@ -274,6 +416,18 @@ class BasicViewerApp final
                 .rotation = cube.rotation,
             });
         }
+        const auto column = column_transform();
+        picker_.add_obb({
+            .object_id = object_ids_.column,
+            .center = column.translation,
+            .half_extent = 0.5f * glm::abs(column.scale),
+            .rotation = column.rotation,
+        });
+        picker_.add_sphere({
+            .object_id = object_ids_.small_sphere,
+            .center = small_sphere_position_,
+            .radius = 0.36f,
+        });
     }
 
     auto handle_selection_click(const FrameContext& frame) -> void
@@ -304,6 +458,14 @@ class BasicViewerApp final
         if (is_selected(object_ids_.cube))
         {
             return "Cube";
+        }
+        if (is_selected(object_ids_.column))
+        {
+            return "Column";
+        }
+        if (is_selected(object_ids_.small_sphere))
+        {
+            return "Small sphere";
         }
         return "None";
     }
@@ -352,6 +514,37 @@ class BasicViewerApp final
                     "Material: metallic %.2f roughness %.2f",
                     static_cast<double>(materials_.cube.metallic),
                     static_cast<double>(materials_.cube.roughness)
+                );
+            }
+            else if (is_selected(object_ids_.column))
+            {
+                const auto column = column_transform();
+                ImGui::Text(
+                    "Position: %.3f %.3f %.3f",
+                    static_cast<double>(column.translation.x),
+                    static_cast<double>(column.translation.y),
+                    static_cast<double>(column.translation.z)
+                );
+                ImGui::Text("Mask: camera + shadow producer + receiver");
+                ImGui::Text(
+                    "Material: metallic %.2f roughness %.2f",
+                    static_cast<double>(materials_.column.metallic),
+                    static_cast<double>(materials_.column.roughness)
+                );
+            }
+            else if (is_selected(object_ids_.small_sphere))
+            {
+                ImGui::Text(
+                    "Position: %.3f %.3f %.3f",
+                    static_cast<double>(small_sphere_position_.x),
+                    static_cast<double>(small_sphere_position_.y),
+                    static_cast<double>(small_sphere_position_.z)
+                );
+                ImGui::Text("Mask: camera + shadow producer + receiver");
+                ImGui::Text(
+                    "Material: metallic %.2f roughness %.2f",
+                    static_cast<double>(materials_.small_sphere.metallic),
+                    static_cast<double>(materials_.small_sphere.roughness)
                 );
             }
             if (ImGui::Button("Clear selection"))
@@ -407,6 +600,7 @@ class BasicViewerApp final
     TextureHandle cube_texture_{};
     ObjectId selected_object_id_{};
     Vec3 sphere_position_{0.0f, 0.0f, 1.0f};
+    Vec3 small_sphere_position_{1.15f, -1.45f, 0.42f};
     f32 sphere_radius_{0.75f};
     u32 sphere_slices_{40u};
     u32 sphere_stacks_{20u};
@@ -415,6 +609,8 @@ class BasicViewerApp final
     bool show_vector_field_{true};
     bool show_sphere_wire_{true};
     bool show_normal_debug_{};
+    bool show_camera_depth_debug_{};
+    bool show_light_gizmos_{true};
     bool hide_cube_{};
     bool selection_window_open_{};
 
@@ -423,6 +619,8 @@ class BasicViewerApp final
         ObjectId floor{1u};
         ObjectId sphere{2u};
         ObjectId cube{3u};
+        ObjectId column{4u};
+        ObjectId small_sphere{5u};
     };
     ObjectIdsConfig object_ids_{};
 
@@ -446,8 +644,61 @@ class BasicViewerApp final
             .roughness = 0.62f,
             .ambient_occlusion = 1.0f,
         };
+        Material column{
+            .base_color = {0.72f, 0.68f, 0.58f, 1.0f},
+            .metallic = 0.0f,
+            .roughness = 0.44f,
+            .ambient_occlusion = 1.0f,
+        };
+        Material small_sphere{
+            .base_color = {0.95f, 0.82f, 0.34f, 1.0f},
+            .metallic = 0.55f,
+            .roughness = 0.26f,
+            .ambient_occlusion = 1.0f,
+        };
     };
     MaterialsConfig materials_{};
+
+    struct LightsConfig
+    {
+        Color ambient{0.030f, 0.036f, 0.046f, 1.0f};
+        DirectionalLightConfig sun{
+            .direction = {-0.42f, -0.34f, -0.84f},
+            .color = {1.0f, 0.94f, 0.84f, 1.0f},
+            .intensity = 2.45f,
+            .shadow = {
+                .enabled = true,
+                .bias = 0.0040f,
+                .strength = 0.78f,
+                .near_plane = 0.05f,
+                .far_plane = 24.0f,
+                .ortho_extent = 5.2f,
+            },
+        };
+        RadialLightConfig radial{
+            .position = {-2.2f, -1.3f, 1.55f},
+            .color = {0.24f, 0.78f, 1.0f, 1.0f},
+            .intensity = 18.0f,
+            .range = 5.0f,
+        };
+        SpotLightConfig spot{
+            .position = {2.4f, -2.2f, 2.65f},
+            .direction = {-0.62f, 0.48f, -0.62f},
+            .color = {1.0f, 0.44f, 0.22f, 1.0f},
+            .intensity = 32.0f,
+            .range = 7.0f,
+            .inner_cone_angle = glm::radians(10.0f),
+            .outer_cone_angle = glm::radians(24.0f),
+        };
+    };
+    LightsConfig lights_{};
+
+    struct CameraDepthDebugConfig
+    {
+        f32 near_distance{2.0f};
+        f32 far_distance{8.5f};
+    };
+    CameraDepthDebugConfig camera_depth_debug_cfg_{};
 
     struct DebugAxisConfig
     {
@@ -501,7 +752,7 @@ auto print_usage(const char* executable) -> void
 {
     std::cout << "usage: " << executable
               << " [--smoke-frames N] [--screenshot PATH] [--hide-ui]"
-                 " [--transparent-screenshot] [--normal-debug]\n";
+                 " [--transparent-screenshot] [--normal-debug] [--depth-debug]\n";
 }
 }  // namespace
 
@@ -511,6 +762,7 @@ auto main(const int argc, char** argv) -> int
     {
         auto config = ds_vk::RuntimeConfig{.window_title = "ds_vk Basic Viewer"};
         auto start_normal_debug = false;
+        auto start_depth_debug = false;
         for (auto i = 1; i < argc; ++i)
         {
             const auto arg = std::string_view{argv[i]};
@@ -539,6 +791,10 @@ auto main(const int argc, char** argv) -> int
             {
                 start_normal_debug = true;
             }
+            else if (arg == "--depth-debug")
+            {
+                start_depth_debug = true;
+            }
             else
             {
                 std::cerr << "unknown or incomplete argument: " << arg << '\n';
@@ -549,6 +805,7 @@ auto main(const int argc, char** argv) -> int
 
         auto app = BasicViewerApp{};
         app.set_normal_debug(start_normal_debug);
+        app.set_camera_depth_debug(start_depth_debug);
         auto runtime = ds_vk::Runtime{std::move(config)};
         return runtime.run(app);
     }

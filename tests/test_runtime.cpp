@@ -32,6 +32,7 @@ static_assert(ds_vk::detail::has_runtime_hook<SetupOnlyApp>);
 static_assert(!ds_vk::detail::has_runtime_hook<NoHooksApp>);
 static_assert(!std::is_polymorphic_v<PlainApp>);
 static_assert(sizeof(ds_vk::MeshDebugMode) == sizeof(ds_vk::u8));
+static_assert(sizeof(ds_vk::LightType) == sizeof(ds_vk::u8));
 
 auto check(const bool condition, const std::string_view message) -> void
 {
@@ -101,10 +102,29 @@ auto test_draw_list() -> void
     check(draw.mesh_commands().back().debug.selected, "mesh draw records selected debug flag");
 
     draw.draw_mesh({
+        .mesh = ds_vk::MeshHandle{.index = 8u},
+        .mask = {.visible_to_camera = false, .shadow_producer = true},
+    });
+    check(draw.mesh_commands().size() == 2u, "shadow-only mesh draw is recorded");
+    check(
+        !draw.mesh_commands().back().mask.visible_to_camera,
+        "mesh draw records camera visibility mask"
+    );
+    check(
+        draw.mesh_commands().back().mask.shadow_producer, "mesh draw records shadow producer mask"
+    );
+
+    draw.draw_mesh({
+        .mesh = ds_vk::MeshHandle{.index = 9u},
+        .mask = {.visible_to_camera = false, .shadow_producer = false},
+    });
+    check(draw.mesh_commands().size() == 2u, "fully invisible mesh draw is culled");
+
+    draw.draw_mesh({
         .mesh = ds_vk::MeshHandle{.index = 3u},
         .debug = {.hidden = true},
     });
-    check(draw.mesh_commands().size() == 1u, "hidden mesh draws are culled");
+    check(draw.mesh_commands().size() == 2u, "hidden mesh draws are culled");
 
     draw.draw_mesh({
         .mesh = ds_vk::MeshHandle{.index = 4u},
@@ -118,18 +138,53 @@ auto test_draw_list() -> void
         .mesh = ds_vk::MeshHandle{.index = 1u},
         .object_id = {.value = 7u},
         .color = ds_vk::Color{0.8f, 0.7f, 0.6f, 1.0f},
-        .debug = {.mode = ds_vk::MeshDebugMode::color_override},
+        .debug = {
+            .mode = ds_vk::MeshDebugMode::camera_depth,
+            .scalar_range = {1.0f, 12.0f},
+        },
     });
-    check(draw.mesh_commands().size() == 3u, "basic mesh draw is recorded");
+    check(draw.mesh_commands().size() == 4u, "basic mesh draw is recorded");
     check(
         draw.mesh_commands().back().material.base_color.r() == 0.8f,
         "basic mesh draw maps color to material"
     );
     check(draw.mesh_commands().back().object_id.value == 7u, "basic mesh draw records object id");
     check(
-        draw.mesh_commands().back().debug.mode == ds_vk::MeshDebugMode::color_override,
-        "basic mesh draw records debug mode"
+        draw.mesh_commands().back().debug.mode == ds_vk::MeshDebugMode::camera_depth,
+        "basic mesh draw records camera depth debug mode"
     );
+    check(
+        draw.mesh_commands().back().debug.scalar_range.y == 12.0f,
+        "basic mesh draw records depth debug range"
+    );
+
+    draw.set_ambient_light(ds_vk::Color{0.1f, 0.2f, 0.3f, 1.0f});
+    check(draw.ambient_light().g() == 0.2f, "draw list records ambient light");
+    draw.directional_light({
+        .direction = {-1.0f, -1.0f, -1.0f},
+        .intensity = 2.0f,
+        .shadow = {.enabled = true},
+    });
+    draw.radial_light({
+        .position = {1.0f, 2.0f, 3.0f},
+        .intensity = 12.0f,
+        .range = 4.0f,
+    });
+    draw.spot_light({
+        .position = {0.0f, 0.0f, 3.0f},
+        .direction = {0.0f, 0.0f, -1.0f},
+        .intensity = 20.0f,
+        .range = 6.0f,
+        .inner_cone_angle = 0.2f,
+        .outer_cone_angle = 0.5f,
+    });
+    check(draw.lights().size() == 3u, "draw list records three light types");
+    check(draw.lights()[0].type == ds_vk::LightType::directional, "directional light type");
+    check(draw.lights()[0].shadow.enabled, "directional light records shadow config");
+    check(draw.lights()[1].type == ds_vk::LightType::radial, "radial light type");
+    check(draw.lights()[2].type == ds_vk::LightType::spot, "spot light type");
+    draw.radial_light({.enabled = false});
+    check(draw.lights().size() == 3u, "disabled lights are ignored");
 
     draw.debug_line({
         .start = {0.0f, 0.0f, 0.0f},
@@ -162,6 +217,8 @@ auto test_draw_list() -> void
     draw.clear();
     check(draw.mesh_commands().empty(), "clear removes mesh commands");
     check(draw.debug_segments().empty(), "clear removes debug segments");
+    check(draw.lights().empty(), "clear removes lights");
+    check(draw.ambient_light().r() == 0.035f, "clear resets ambient light");
 }
 }  // namespace
 

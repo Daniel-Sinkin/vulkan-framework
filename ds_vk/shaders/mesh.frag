@@ -14,10 +14,28 @@ struct Material
     vec4 emissive_color;
     vec4 pbr_params;
     vec4 texture_params;
+    vec4 render_params;
     vec4 debug_color;
     vec4 debug_params;
     vec4 debug_params2;
     vec4 camera_position;
+    vec4 camera_forward;
+};
+
+struct Light
+{
+    vec4 position_range;
+    vec4 direction_type;
+    vec4 color_intensity;
+    vec4 spot_shadow;
+};
+
+struct Lighting
+{
+    vec4 ambient_light_count;
+    mat4 shadow_view_projection;
+    vec4 shadow_params;
+    Light lights[16];
 };
 
 layout(set = 0, binding = 0) readonly buffer MaterialBuffer
@@ -26,7 +44,13 @@ layout(set = 0, binding = 0) readonly buffer MaterialBuffer
 }
 material_buffer;
 
-layout(set = 0, binding = 1) uniform sampler2D material_textures[16];
+layout(set = 0, binding = 1) uniform sampler2D material_textures[15];
+layout(set = 0, binding = 2) readonly buffer LightingBuffer
+{
+    Lighting lighting;
+}
+lighting_buffer;
+layout(set = 0, binding = 3) uniform sampler2D shadow_map;
 
 const float PI = 3.14159265359;
 const uint DEBUG_NONE = 0;
@@ -35,6 +59,10 @@ const uint DEBUG_SELECTED_PULSE = 2;
 const uint DEBUG_SCALAR_HEATMAP = 3;
 const uint DEBUG_NORMAL = 4;
 const uint DEBUG_OBJECT_ID = 5;
+const uint DEBUG_CAMERA_DEPTH = 6;
+const uint LIGHT_DIRECTIONAL = 0;
+const uint LIGHT_RADIAL = 1;
+const uint LIGHT_SPOT = 2;
 
 float distribution_ggx(vec3 normal, vec3 half_vector, float roughness)
 {
@@ -104,6 +132,124 @@ vec3 object_id_color(uint object_id)
     );
 }
 
+float range_attenuation(float distance_to_light, float range)
+{
+    float distance_squared = max(distance_to_light * distance_to_light, 0.01);
+    if (range <= 0.0)
+    {
+        return 1.0 / distance_squared;
+    }
+    float x = clamp(distance_to_light / range, 0.0, 1.0);
+    float smooth_cutoff = clamp(1.0 - x * x * x * x, 0.0, 1.0);
+    return smooth_cutoff / distance_squared;
+}
+
+float shadow_visibility(Material material)
+{
+    if (lighting_buffer.lighting.shadow_params.x < 0.5 || material.render_params.y < 0.5)
+    {
+        return 1.0;
+    }
+
+    vec4 shadow_clip =
+        lighting_buffer.lighting.shadow_view_projection * vec4(in_world_position, 1.0);
+    if (shadow_clip.w <= 0.0)
+    {
+        return 1.0;
+    }
+
+    vec3 shadow_ndc = shadow_clip.xyz / shadow_clip.w;
+    vec2 uv = shadow_ndc.xy * 0.5 + 0.5;
+    if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0 || shadow_ndc.z <= 0.0
+        || shadow_ndc.z >= 1.0)
+    {
+        return 1.0;
+    }
+
+    float bias = lighting_buffer.lighting.shadow_params.y;
+    float map_size = max(lighting_buffer.lighting.shadow_params.w, 1.0);
+    vec2 texel = vec2(1.0 / map_size);
+    float visibility = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            float closest = texture(shadow_map, uv + vec2(x, y) * texel).r;
+            visibility += (shadow_ndc.z - bias <= closest) ? 1.0 : 0.0;
+        }
+    }
+    return visibility / 9.0;
+}
+
+vec3 pbr_light(
+    vec3 albedo,
+    float metallic,
+    float roughness,
+    vec3 normal,
+    vec3 view,
+    vec3 light_direction,
+    vec3 radiance
+)
+{
+    vec3 half_vector = normalize_or(light_direction + view, normal);
+    float n_dot_l = max(dot(normal, light_direction), 0.0);
+    float n_dot_v = max(dot(normal, view), 0.0);
+    vec3 f0 = mix(vec3(0.04), albedo, metallic);
+    vec3 fresnel = fresnel_schlick(max(dot(half_vector, view), 0.0), f0);
+    float normal_distribution = distribution_ggx(normal, half_vector, roughness);
+    float geometry = geometry_smith(normal, view, light_direction, roughness);
+    vec3 numerator = normal_distribution * geometry * fresnel;
+    float denominator = max(4.0 * n_dot_v * n_dot_l, 0.0001);
+    vec3 specular = numerator / denominator;
+    vec3 k_s = fresnel;
+    vec3 k_d = (vec3(1.0) - k_s) * (1.0 - metallic);
+    vec3 diffuse = k_d * albedo / PI;
+    return (diffuse + specular) * radiance * n_dot_l;
+}
+
+vec3 evaluate_light(
+    Light light,
+    Material material,
+    vec3 albedo,
+    float metallic,
+    float roughness,
+    vec3 normal,
+    vec3 view
+)
+{
+    uint type = uint(light.direction_type.w + 0.5);
+    vec3 light_direction = vec3(0.0, 0.0, 1.0);
+    float attenuation = 1.0;
+    if (type == LIGHT_DIRECTIONAL)
+    {
+        light_direction = normalize_or(-light.direction_type.xyz, vec3(0.0, 0.0, 1.0));
+    }
+    else
+    {
+        vec3 to_light = light.position_range.xyz - in_world_position;
+        float distance_to_light = length(to_light);
+        light_direction = normalize_or(to_light, vec3(0.0, 0.0, 1.0));
+        attenuation = range_attenuation(distance_to_light, light.position_range.w);
+        if (type == LIGHT_SPOT)
+        {
+            vec3 from_light = -light_direction;
+            float cd =
+                dot(normalize_or(light.direction_type.xyz, vec3(0.0, 0.0, -1.0)), from_light);
+            float angular_attenuation =
+                clamp(cd * light.spot_shadow.x + light.spot_shadow.y, 0.0, 1.0);
+            attenuation *= angular_attenuation * angular_attenuation;
+        }
+    }
+
+    float visibility = 1.0;
+    if (light.spot_shadow.z > 0.5)
+    {
+        visibility = mix(1.0, shadow_visibility(material), clamp(light.spot_shadow.w, 0.0, 1.0));
+    }
+    vec3 radiance = light.color_intensity.rgb * light.color_intensity.w * attenuation * visibility;
+    return pbr_light(albedo, metallic, roughness, normal, view, light_direction, radiance);
+}
+
 vec3 apply_debug(vec3 shaded_color, vec3 normal, Material material)
 {
     uint mode = uint(material.debug_params.x + 0.5);
@@ -126,6 +272,15 @@ vec3 apply_debug(vec3 shaded_color, vec3 normal, Material material)
     else if (mode == DEBUG_OBJECT_ID)
     {
         result = object_id_color(uint(material.debug_params2.y + 0.5));
+    }
+    else if (mode == DEBUG_CAMERA_DEPTH)
+    {
+        float near_depth = material.debug_params.z;
+        float far_depth = max(material.debug_params.w, near_depth + 0.0001);
+        vec3 camera_forward = normalize_or(material.camera_forward.xyz, vec3(0.0, 0.0, -1.0));
+        float camera_depth = dot(in_world_position - material.camera_position.xyz, camera_forward);
+        float depth = smoothstep(near_depth, far_depth, camera_depth);
+        result = vec3(depth);
     }
 
     if (mode == DEBUG_SELECTED_PULSE || material.debug_params2.z > 0.5)
@@ -153,23 +308,28 @@ void main()
     float roughness = clamp(material.pbr_params.y, 0.04, 1.0);
     float ambient_occlusion = clamp(material.pbr_params.z, 0.0, 1.0);
     vec3 normal = normalize_or(in_normal, vec3(0.0, 0.0, 1.0));
-    vec3 light = normalize(vec3(0.35, 0.45, 0.82));
     vec3 view = normalize_or(material.camera_position.xyz - in_world_position, vec3(0.0, 0.0, 1.0));
-    vec3 half_vector = normalize_or(light + view, normal);
-    vec3 radiance = vec3(1.85);
-    float n_dot_l = max(dot(normal, light), 0.0);
-    float n_dot_v = max(dot(normal, view), 0.0);
-    vec3 f0 = mix(vec3(0.04), albedo, metallic);
-    vec3 fresnel = fresnel_schlick(max(dot(half_vector, view), 0.0), f0);
-    float normal_distribution = distribution_ggx(normal, half_vector, roughness);
-    float geometry = geometry_smith(normal, view, light, roughness);
-    vec3 numerator = normal_distribution * geometry * fresnel;
-    float denominator = max(4.0 * n_dot_v * n_dot_l, 0.0001);
-    vec3 specular = numerator / denominator;
-    vec3 k_s = fresnel;
-    vec3 k_d = (vec3(1.0) - k_s) * (1.0 - metallic);
-    vec3 diffuse = k_d * albedo / PI;
-    vec3 ambient = albedo * 0.045 * ambient_occlusion;
-    vec3 color = ambient + (diffuse + specular) * radiance * n_dot_l + material.emissive_color.rgb;
+    vec3 ambient = albedo * lighting_buffer.lighting.ambient_light_count.rgb * ambient_occlusion;
+    vec3 color = ambient + material.emissive_color.rgb;
+    if (material.render_params.x > 0.5)
+    {
+        uint light_count = min(uint(lighting_buffer.lighting.ambient_light_count.w + 0.5), 16u);
+        for (uint i = 0u; i < light_count; ++i)
+        {
+            color += evaluate_light(
+                lighting_buffer.lighting.lights[i],
+                material,
+                albedo,
+                metallic,
+                roughness,
+                normal,
+                view
+            );
+        }
+    }
+    else
+    {
+        color = albedo + material.emissive_color.rgb;
+    }
     out_color = vec4(apply_debug(color, normal, material), surface_color.a);
 }

@@ -105,6 +105,7 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
   set(DS_VK_SHADER_SOURCES
     ds_vk/shaders/mesh.vert
     ds_vk/shaders/mesh.frag
+    ds_vk/shaders/shadow.vert
     ds_vk/shaders/debug_line.vert
     ds_vk/shaders/debug_line.frag
   )

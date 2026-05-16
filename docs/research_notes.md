@@ -141,6 +141,87 @@ Things intentionally *not* copied verbatim:
   - Too sample-oriented to copy as a framework shape, but good as future
     reference when adding glTF, compute, and specialized pipelines.
 
+## Lighting / Shadow Research Pass
+
+Sources checked for this pass:
+
+- Khronos Vulkan Samples, multithreaded render passes:
+  https://docs.vulkan.org/samples/latest/samples/performance/multithreading_render_passes/README.html
+  - The sample describes classic shadow mapping as two render passes: first
+    render depth from the light's view, then render the camera view and sample
+    that depth texture in the fragment shader to decide whether the fragment is
+    occluded from the light.
+  - This maps well to this framework because it keeps the renderer shader based
+    and does not require acceleration structures or ray queries.
+
+- Vulkan Guide, depth:
+  https://docs.vulkan.org/guide/latest/depth.html
+  - Vulkan depth buffers are ordinary `VkImage` / `VkImageView` resources used
+    by framebuffers. Shadow maps therefore need both
+    `VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` and
+    `VK_IMAGE_USAGE_SAMPLED_BIT`.
+  - Depth-only shadow passes should clear through the attachment load op.
+  - Depth writes belong to the early/late fragment test pipeline stages, not the
+    fragment shader stage. Synchronization from shadow rendering to shadow
+    sampling must use depth-stencil attachment write access as the source and
+    shader-read access as the destination.
+
+- Vulkan Guide, synchronization examples:
+  https://docs.vulkan.org/guide/latest/synchronization_examples.html
+  - The guide has a specific "depth attachment then fragment-shader sampled"
+    example for shadow maps. The important shape is depth-stencil attachment
+    write in early/late fragment tests to fragment shader read.
+  - `ds_vk` currently uses legacy `vkCmdPipelineBarrier` because the rest of the
+    runtime already uses Vulkan 1.2-era render passes. A later cleanup can move
+    this to `vkCmdPipelineBarrier2`.
+
+- Vulkan spec, render passes:
+  https://docs.vulkan.org/spec/latest/chapters/renderpass.html
+  - Read-only depth/stencil layouts are intended for resources that are sampled
+    or otherwise read after being used as attachments.
+  - For this pass the shadow attachment final layout is
+    `VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL` and the descriptor uses
+    that same layout.
+
+- Khronos glTF `KHR_lights_punctual`:
+  https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_lights_punctual/README.md
+  - Useful light semantics even though this repo is not a glTF renderer.
+  - Adopted the same three conceptual light families: directional, point
+    (called radial in `ds_vk`), and spot.
+  - Adopted inverse-square point/spot attenuation with a smooth range cutoff.
+  - Adopted the common CPU-precomputed spot cone scale/offset form so the shader
+    only does a dot product, clamp, and square.
+
+- Sascha Willems / Vulkan sample descriptions:
+  https://github.com/Voultapher/Vulkan-Samples
+  - Useful as a sanity check for the raster path: directional shadow mapping is
+    a projective two-pass depth texture; omnidirectional point-light shadows use
+    a cube map and are materially more work.
+
+Implementation decisions:
+
+- Add explicit `LightConfig` data to the draw list rather than faking light from
+  a hard-coded shader coordinate.
+- Keep emission as surface color only. It does not generate lighting because
+  that would imply global illumination or at least many extra approximations.
+- Store per-frame lights in a storage buffer. This keeps the mesh pipeline
+  descriptor layout stable while the app changes light count and parameters.
+- Limit built-in lights to 16 for now. That is enough for visual experiments and
+  keeps the shader/data layout simple.
+- Support one active shadow-casting directional or spot light per frame. The
+  first shadow-enabled supported light wins. This is intentionally a first
+  working shape, not a final multi-shadow atlas.
+- Do not implement radial/point shadows yet. Proper radial shadows need an
+  omnidirectional cube shadow map, six light-space renders or layered rendering,
+  and different sampling/comparison math. That should be its own focused pass.
+- Add `MeshRenderMask` with camera visibility, shadow producer, shadow consumer,
+  and light receiver booleans. These are per draw/object semantics and should
+  not be tied to `MeshHandle`, because the same mesh resource can represent many
+  app-owned objects.
+- Reduce the fixed material texture table from 16 to 15 slots because the shadow
+  map sampler shares the same fragment shader stage and MoltenVK commonly
+  exposes a 16-sampler per-stage floor on Apple hardware.
+
 ## Framework Shape Chosen For This Pass
 
 The repo starts as a "Vulkan runtime plus helpers", not an engine:
@@ -656,3 +737,56 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
   `run/texture_materials.png`. The first screenshot run caught the sampler-limit
   validation error above; after reducing the table to 16 the screenshot run was
   clean and nonblank.
+
+### 2026-05-16 Lights, Masks, And First Shadow Map
+
+- Replaced the hard-coded shader light direction with explicit per-frame lights
+  recorded through `DrawList`.
+- Added directional, radial, and spot light configs. Directional lights have a
+  direction and no attenuation; radial and spot lights have position, range, and
+  inverse-square-ish attenuation with a smooth cutoff. Spot lights also use
+  CPU-precomputed cone scale/offset from the Khronos punctual-lights reference.
+- Added `MeshRenderMask`:
+  - `visible_to_camera` controls camera-pass rendering;
+  - `shadow_producer` controls participation in the shadow depth pass;
+  - `shadow_consumer` controls whether the object samples the active shadow map;
+  - `light_receiver` controls whether direct lights are applied.
+- Added a depth-only shadow pipeline and `shadow.vert`. The runtime renders the
+  first shadow-enabled directional or spot light into a sampled depth texture,
+  then the mesh fragment shader applies a small 3x3 PCF kernel when evaluating
+  that light.
+- The shadow-map synchronization barrier uses depth-stencil attachment write
+  access from both early and late fragment-test stages to fragment-shader
+  sampled-image reads. This follows the Vulkan Guide shape for depth attachment
+  to shadow-map sampling.
+- Reduced material texture slots from 16 to 15 because the mesh fragment shader
+  also binds one shadow-map sampler. This keeps the current fixed descriptor set
+  below the 16-sampler MoltenVK limit found earlier.
+- App scene now contains the textured floor, large sphere, cube, column, small
+  metallic sphere, vector field, grid, and light gizmos. The floor is configured
+  as a shadow consumer but not a shadow producer, which exercises the render
+  masks without making the ground self-cast.
+- Verification:
+  - `cmake --build build-core`
+  - `cmake --build build`
+  - `ctest --test-dir build-core --output-on-failure`
+  - `ctest --test-dir build --output-on-failure`
+  - `clang-tidy -p build ds_vk/runtime.cpp app/main.cpp tests/test_runtime.cpp tests/test_main.cpp`
+  - `./run.sh --smoke-frames 8 --screenshot run/lights_shadows.png --hide-ui`
+  - `./.venv/bin/python scripts/validate_screenshot.py run/lights_shadows.png --min-stddev 4 --min-brightness 5`
+
+### 2026-05-16 Camera Depth Debug View
+
+- Added `MeshDebugMode::camera_depth`. It shades mesh fragments as grayscale
+  linear camera-space depth using the material's debug scalar range as near/far
+  visualization bounds.
+- This is intentionally not yet a sampled swapchain-depth attachment preview.
+  It still uses the normal camera depth test for visibility, so it gives the
+  same "fog-like depth buffer" read on visible mesh surfaces without adding
+  another sampled-depth descriptor, render-pass dependency, or post-process
+  fullscreen pipeline.
+- The app exposes this as "Camera depth debug", plus `--depth-debug` for
+  screenshot/smoke runs. When enabled, colored debug overlays are suppressed so
+  the view stays grayscale.
+- The app now labels the three light toggles explicitly as Directional, Radial,
+  and Spot, and light gizmos follow the same per-light `enabled` flags.
