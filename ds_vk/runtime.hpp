@@ -24,9 +24,20 @@ struct MeshHandle
     }
 };
 
+struct TextureHandle
+{
+    u32 index{std::numeric_limits<u32>::max()};
+
+    [[nodiscard]] auto valid() const noexcept -> bool
+    {
+        return index != std::numeric_limits<u32>::max();
+    }
+};
+
 struct DescriptorIndexingSupport
 {
     bool descriptor_indexing{};
+    bool sampled_image_array_dynamic_indexing{};
     bool runtime_descriptor_array{};
     bool descriptor_binding_partially_bound{};
     bool sampled_image_non_uniform_indexing{};
@@ -35,11 +46,91 @@ struct DescriptorIndexingSupport
     bool storage_buffer_update_after_bind{};
 };
 
+struct MaterialTextures
+{
+    TextureHandle base_color{};
+};
+
+struct Material
+{
+    Color base_color{Color::white};
+    Color emissive_color{Color::black};
+    f32 metallic{0.0f};
+    f32 roughness{0.55f};
+    f32 ambient_occlusion{1.0f};
+    MaterialTextures textures{};
+};
+
+enum class MeshDebugMode : u8
+{
+    none = 0,
+    color_override = 1,
+    selected_pulse = 2,
+    scalar_heatmap = 3,
+    normal = 4,
+    object_id = 5,
+};
+
+struct MeshDebugConfig
+{
+    MeshDebugMode mode{MeshDebugMode::none};
+    Color color{1.0f, 0.0f, 1.0f, 0.85f};
+    f32 scalar{};
+    Vec2 scalar_range{0.0f, 1.0f};
+    bool selected{};
+    bool hidden{};
+};
+
+struct MeshDrawConfig
+{
+    MeshHandle mesh{};
+    ObjectId object_id{};
+    Transform transform{};
+    Material material{};
+    MeshDebugConfig debug{};
+};
+
+struct BasicMeshDrawConfig
+{
+    MeshHandle mesh{};
+    ObjectId object_id{};
+    Transform transform{};
+    Color color{Color::white};
+    MeshDebugConfig debug{};
+};
+
 struct MeshDrawCommand
 {
     MeshHandle mesh{};
+    ObjectId object_id{};
     Transform transform{};
-    Vec4 color{1.0f};
+    Material material{};
+    MeshDebugConfig debug{};
+};
+
+struct DebugLineConfig
+{
+    Vec3 start{};
+    Vec3 end{};
+    Color color{Color::white};
+    f32 width{0.012f};
+};
+
+struct DebugArrowConfig
+{
+    Vec3 origin{};
+    Vec3 vector{};
+    Color color{Color::white};
+    f32 width{0.016f};
+};
+
+struct DebugSphereConfig
+{
+    Vec3 center{};
+    f32 radius{1.0f};
+    Color color{Color::white};
+    u32 segments{32u};
+    f32 width{0.010f};
 };
 
 struct DebugSegment
@@ -48,17 +139,24 @@ struct DebugSegment
     f32 width{0.012f};
     Vec3 end{};
     f32 arrow_tip{};
-    Vec4 color{1.0f};
+    Color color{Color::white};
 };
 
 class DrawList
 {
   public:
     auto clear() -> void;
-    auto draw_mesh(MeshHandle mesh, const Transform& transform, Vec4 color = Vec4{1.0f}) -> void;
-    auto debug_line(Vec3 start, Vec3 end, Vec4 color, f32 width = 0.012f) -> void;
-    auto debug_arrow(Vec3 origin, Vec3 vector, Vec4 color, f32 width = 0.016f) -> void;
-    auto debug_sphere(Vec3 center, f32 radius, Vec4 color, u32 segments = 32u, f32 width = 0.010f)
+    auto draw_mesh(const MeshDrawConfig& config) -> void;
+    auto draw_basic_mesh(const BasicMeshDrawConfig& config) -> void;
+    auto draw_basic_mesh(
+        MeshHandle mesh, const Transform& transform = Transform{}, Color color = Color::white
+    ) -> void;
+    auto debug_line(const DebugLineConfig& config) -> void;
+    auto debug_line(Vec3 start, Vec3 end, Color color, f32 width = 0.012f) -> void;
+    auto debug_arrow(const DebugArrowConfig& config) -> void;
+    auto debug_arrow(Vec3 origin, Vec3 vector, Color color, f32 width = 0.016f) -> void;
+    auto debug_sphere(const DebugSphereConfig& config) -> void;
+    auto debug_sphere(Vec3 center, f32 radius, Color color, u32 segments = 32u, f32 width = 0.010f)
         -> void;
 
     [[nodiscard]] auto mesh_commands() const noexcept -> const std::vector<MeshDrawCommand>&;
@@ -90,7 +188,35 @@ struct RuntimeConfig
     bool hide_ui{};
     bool transparent_screenshot{};
     bool enable_validation{true};
-    Vec4 clear_color{0.035f, 0.045f, 0.055f, 1.0f};
+    Color clear_color{0.035f, 0.045f, 0.055f, 1.0f};
+};
+
+struct TextureLoadConfig
+{
+    bool srgb{true};
+};
+
+struct KeyboardModifiers
+{
+    bool shift{};
+    bool control{};
+    bool alt{};
+    bool super{};
+};
+
+struct MouseClick
+{
+    bool occurred{};
+    Vec2 position_px{};
+    u8 click_count{};
+    KeyboardModifiers modifiers{};
+};
+
+struct InputState
+{
+    Vec2 mouse_px{};
+    bool mouse_captured_by_ui{};
+    MouseClick left_click{};
 };
 
 struct FrameContext
@@ -107,6 +233,7 @@ struct FrameContext
     f32 dt_seconds{};
     Camera& camera;
     DrawList& draw;
+    const InputState& input;
     const DescriptorIndexingSupport& descriptor_indexing;
     const RuntimeStats& stats;
 };
@@ -211,8 +338,11 @@ class Runtime
 
     auto upload_mesh(const MeshData& mesh) -> MeshHandle;
     auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
+    auto load_texture(const std::filesystem::path& path, const TextureLoadConfig& config = {})
+        -> TextureHandle;
     auto request_screenshot(std::filesystem::path path, bool transparent = false) -> void;
 
+    auto camera(const CameraConfig& config) noexcept -> Camera&;
     [[nodiscard]] auto camera() noexcept -> Camera&;
     [[nodiscard]] auto camera() const noexcept -> const Camera&;
     [[nodiscard]] auto stats() const noexcept -> const RuntimeStats&;

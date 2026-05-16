@@ -12,3 +12,5 @@ Copied from `/Users/danielsinkin/GitHub_private/SPH-Seminar/dfsph_viewer` on
 - VMA: copied from `dfsph_viewer/external/vma`
 - stb image writer: copied from the GLFW dependency folder vendored inside
   SPlisHSPlasH in the SPH viewer project.
+- stb image loader: `nothings/stb`, `stb_image.h` downloaded from the official
+  upstream repository on 2026-05-16.

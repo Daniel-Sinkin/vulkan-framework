@@ -18,14 +18,22 @@ auto push_face(
     const Vec3 c,
     const Vec3 d,
     const Vec3 normal,
-    const Vec4 color
+    const Color color
 ) -> void
 {
     const auto base = static_cast<u32>(mesh.vertices.size());
-    mesh.vertices.push_back(Vertex{.position = a, .normal = normal, .color = color});
-    mesh.vertices.push_back(Vertex{.position = b, .normal = normal, .color = color});
-    mesh.vertices.push_back(Vertex{.position = c, .normal = normal, .color = color});
-    mesh.vertices.push_back(Vertex{.position = d, .normal = normal, .color = color});
+    mesh.vertices.push_back(
+        Vertex{.position = a, .normal = normal, .color = color, .texcoord = {0.0f, 0.0f}}
+    );
+    mesh.vertices.push_back(
+        Vertex{.position = b, .normal = normal, .color = color, .texcoord = {1.0f, 0.0f}}
+    );
+    mesh.vertices.push_back(
+        Vertex{.position = c, .normal = normal, .color = color, .texcoord = {1.0f, 1.0f}}
+    );
+    mesh.vertices.push_back(
+        Vertex{.position = d, .normal = normal, .color = color, .texcoord = {0.0f, 1.0f}}
+    );
     mesh.indices.insert(
         mesh.indices.end(), {base + 0u, base + 1u, base + 2u, base + 0u, base + 2u, base + 3u}
     );
@@ -40,21 +48,41 @@ auto Transform::matrix() const noexcept -> Mat4
     return translation_matrix * rotation_matrix * scale_matrix;
 }
 
-auto make_quad(const f32 side_length, const Vec4 color) -> MeshData
+auto make_quad(const f32 side_length, const Color color) -> MeshData
 {
     const auto half = 0.5f * std::max(0.0f, side_length);
     auto mesh = MeshData{};
     mesh.vertices = {
-        Vertex{.position = {-half, -half, 0.0f}, .normal = k_axis_z, .color = color},
-        Vertex{.position = {half, -half, 0.0f}, .normal = k_axis_z, .color = color},
-        Vertex{.position = {half, half, 0.0f}, .normal = k_axis_z, .color = color},
-        Vertex{.position = {-half, half, 0.0f}, .normal = k_axis_z, .color = color},
+        Vertex{
+            .position = {-half, -half, 0.0f},
+            .normal = k_axis_z,
+            .color = color,
+            .texcoord = {0.0f, 0.0f},
+        },
+        Vertex{
+            .position = {half, -half, 0.0f},
+            .normal = k_axis_z,
+            .color = color,
+            .texcoord = {1.0f, 0.0f},
+        },
+        Vertex{
+            .position = {half, half, 0.0f},
+            .normal = k_axis_z,
+            .color = color,
+            .texcoord = {1.0f, 1.0f},
+        },
+        Vertex{
+            .position = {-half, half, 0.0f},
+            .normal = k_axis_z,
+            .color = color,
+            .texcoord = {0.0f, 1.0f},
+        },
     };
     mesh.indices = {0u, 1u, 2u, 0u, 2u, 3u};
     return mesh;
 }
 
-auto make_cube(const f32 side_length, const Vec4 color) -> MeshData
+auto make_cube(const f32 side_length, const Color color) -> MeshData
 {
     const auto half = 0.5f * std::max(0.0f, side_length);
     auto mesh = MeshData{};
@@ -119,7 +147,7 @@ auto make_cube(const f32 side_length, const Vec4 color) -> MeshData
     return mesh;
 }
 
-auto make_uv_sphere(const f32 radius, const u32 slices_raw, const u32 stacks_raw, const Vec4 color)
+auto make_uv_sphere(const f32 radius, const u32 slices_raw, const u32 stacks_raw, const Color color)
     -> MeshData
 {
     const auto slices = std::max(3u, slices_raw);
@@ -145,7 +173,12 @@ auto make_uv_sphere(const f32 radius, const u32 slices_raw, const u32 stacks_raw
                 cos_phi,
             };
             mesh.vertices.push_back(
-                Vertex{.position = normal * safe_radius, .normal = normal, .color = color}
+                Vertex{
+                    .position = normal * safe_radius,
+                    .normal = normal,
+                    .color = color,
+                    .texcoord = {u, v},
+                }
             );
         }
     }

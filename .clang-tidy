@@ -13,7 +13,6 @@ Checks: >
   readability-container-size-empty,
   readability-identifier-naming,
   readability-inconsistent-declaration-parameter-name,
-  readability-redundant-member-init,
   readability-use-anyofallof
 WarningsAsErrors: ''
 HeaderFilterRegex: '^(ds_vk|app|tests)/'
@@ -30,5 +29,7 @@ CheckOptions:
     value: lower_case
   - key: readability-identifier-naming.VariableCase
     value: lower_case
-  - key: modernize-use-trailing-return-type.UseTrailingReturnType
+  - key: modernize-use-trailing-return-type.TransformFunctions
     value: true
+  - key: modernize-use-trailing-return-type.TransformLambdas
+    value: none

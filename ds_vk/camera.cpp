@@ -19,6 +19,22 @@ auto safe_normalize(const Vec3 value, const Vec3 fallback) noexcept -> Vec3
 }
 }  // namespace
 
+auto Camera::configure(const CameraConfig& config) noexcept -> Camera&
+{
+    pivot = config.pivot;
+    distance = config.distance;
+    yaw = config.yaw;
+    pitch = config.pitch;
+    fov_y = config.fov_y;
+    orbit_sensitivity = config.orbit_sensitivity;
+    pivot_sensitivity = config.pivot_sensitivity;
+    zoom_sensitivity = config.zoom_sensitivity;
+    z_near = config.z_near;
+    z_far = config.z_far;
+    projection_mode = config.projection_mode;
+    return *this;
+}
+
 auto Camera::position() const noexcept -> Vec3
 {
     const auto cos_pitch = std::cos(pitch);

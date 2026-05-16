@@ -156,9 +156,10 @@ The repo starts as a "Vulkan runtime plus helpers", not an engine:
 - `ds_vk::FrameContext` exposes raw `VkInstance`, `VkPhysicalDevice`,
   `VkDevice`, `VkQueue`, `VkCommandBuffer`, `VmaAllocator`, the current
   `Camera`, and a `DrawList`.
-- `ds_vk::DrawList` is immediate-mode from app code: `draw_mesh`, `debug_line`,
-  `debug_arrow`, `debug_sphere`. Internally the renderer batches debug segments
-  and records mesh draw commands for the frame.
+- `ds_vk::DrawList` is immediate-mode from app code: `draw_mesh`,
+  `draw_basic_mesh`, `debug_line`, `debug_arrow`, `debug_sphere`. Internally
+  the renderer batches debug segments and records mesh draw commands for the
+  frame.
 - Mesh generation is framework code: quad, cube, UV sphere.
 - `.clang-tidy` is intentionally strict on bugprone/analyzer/modernize checks,
   but it does not require private-member suffixes for plain data aggregates and
@@ -276,9 +277,9 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
 - The first mesh shader interface used `view_projection`, `model`, `color`, and
   `light_direction_ambient` in push constants. That is 160 bytes, which works on
   this Mac but exceeds Vulkan's 128-byte guaranteed minimum.
-- The mesh push block is now exactly 128 bytes: model-view-projection, three
-  packed normal-matrix columns, and color. Lighting constants live in the
-  fragment shader until a real material/descriptor path exists.
+- The mesh push block became 128 bytes: model-view-projection, three packed
+  normal-matrix columns, and material base color. Lighting constants lived in
+  the fragment shader until a real material/descriptor path existed.
 - The runtime checks `maxPushConstantsSize` before creating the device and has
   `static_assert`s for the mesh/debug push block sizes.
 - This also fixed normal transformation for non-uniform scaling by using the
@@ -461,3 +462,197 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
 - Verified `clangd --check=app/main.cpp --compile-commands-dir=build`, `cmake
   --build build`, `ctest --test-dir build --output-on-failure`, and
   `run/clangd_external_skip.png` screenshot validation.
+
+### 2026-05-15 Config Struct Experiments
+
+- Added `CameraConfig` as a plain aggregate so app code can use C++ designated
+  initializers for setup:
+  `runtime.camera({.pivot = 0.7f * k_axis_z, .distance = 5.4f, ...});`.
+- `Camera::configure` and `Runtime::camera(config)` set the full camera state
+  from the config values. Omitted fields use `CameraConfig` defaults rather than
+  preserving previous camera state.
+- The app floor grid config now separates `height` from `line_width`; the
+  migration had used the same value for z-offset and rendered line width.
+- Restored the floor grid loop to sweep `-count_per_side` through
+  `+count_per_side`.
+- Added a CPU test for `CameraConfig` application and default retention.
+- Verified with both build trees, both CTest suites, clangd checks for
+  `app/main.cpp` and `ds_vk/camera.cpp`, clang-tidy over touched files, and
+  `run/camera_config_grid.png` screenshot validation.
+
+### 2026-05-15 Config-Based Draw Calls And Materials
+
+- Added config structs for immediate draw calls: `MeshDrawConfig`,
+  `BasicMeshDrawConfig`, `DebugLineConfig`, `DebugArrowConfig`, and
+  `DebugSphereConfig`.
+- `draw_mesh` now takes a mesh, transform, and `Material`. The first material is
+  deliberately small: `Material{.base_color = ...}` feeding the existing
+  Blinn-Phong-style mesh shader.
+- `draw_basic_mesh` keeps the former convenience behavior by mapping a color
+  into `Material::base_color`.
+- Debug draw calls also have config overloads; old positional overloads remain
+  as convenience wrappers for now.
+- The shader push block was still 128 bytes, so material expansion beyond
+  `base_color` should go through a descriptor/material table rather than growing
+  push constants past the Vulkan guaranteed minimum.
+- Added runtime tests that `draw_mesh` records material color and
+  `draw_basic_mesh` maps color into the material.
+
+### 2026-05-15 PBR Materials, Debug Modes, And Selection
+
+- Replaced the interim Blinn-Phong material with a small Cook-Torrance
+  metallic/roughness material:
+  `Material{.base_color, .emissive_color, .metallic, .roughness, .ambient_occlusion}`.
+- Kept this deliberately below Blender BSDF complexity. The shader has one
+  fixed directional light and fixed view approximation for now, but the
+  roughness/metallic knobs are already the right user-facing material language
+  for future environment lighting or camera/light descriptors.
+- The material storage-buffer element now also carries debug parameters. This
+  lets app code request selected pulse, color override, scalar heatmap, normal
+  visualization, or object-id color without growing the push-constant block.
+- Added `ObjectId` and `MeshDebugConfig` to draw configs. The draw list culls
+  `.debug = {.hidden = true}` before recording, and selected objects default to
+  the pulsing debug shader if no explicit debug mode is set.
+- Selection is modeled as a helper layer instead of callbacks on meshes. A mesh
+  resource is just geometry; an app draw is what has object identity, transform,
+  material, hidden state, and selected/debug state.
+- Added CPU tests for PBR material fields surviving draw recording, hidden mesh
+  draw culling, object IDs, debug config propagation, and selection helper
+  intersections. AABB picking normalizes reversed bounds so apps can build boxes
+  from arbitrary point pairs.
+
+### 2026-05-15 Picker Plugin And Click Selection
+
+- Promoted the ad hoc selection helpers into a static optional picker module:
+  `ds_vk_picker` builds from `ds_vk/plugins/picker.cpp` and links into apps or
+  tests that want object selection.
+- The runtime exposes per-frame mouse state through `FrameContext::input`.
+  A left click is recorded only when ImGui does not want the mouse, and SDL
+  window coordinates are converted to framebuffer pixels so Retina swapchains
+  and `make_pick_ray` agree.
+- `ds_vk::Picker` has two public query paths:
+  - `click({.camera, .mouse_px, .viewport_px, .layer_mask})`, for normal app UI
+    mouse picking;
+  - `raycast({.ray, .layer_mask})`, for code that already has a world-space ray.
+- The picker currently supports sphere, AABB, OBB, capsule, and screen-space
+  segment targets. Triangle-mesh picking is intentionally not included because
+  general triangle colliders need a separate acceleration-structure design and
+  are too easy to misuse in visualization apps.
+- Targets carry app-owned `ObjectId`, optional layer masks, `sub_index`, and
+  `user_bits`. The framework never pretends that `MeshHandle` is a scene object;
+  the app creates one pick target per selectable thing and keeps transforms,
+  physics IDs, neighborhood state, and UI data in its own model.
+- The basic app registers one sphere target and one cube OBB target each frame.
+  Clicking either opens a small selection window with object information.
+  Selecting the sphere or cube applies the existing selected-pulse debug mode.
+
+### 2026-05-16 Viz Plugin And Vector Field Demo
+
+- Added a second static plugin target, `ds_vk_viz`, under `ds_vk/plugins`.
+  This is intentionally a reusable visualization vocabulary, not an SPH viewer
+  or app framework. It depends only on `ds_vk_core` and can be used in the
+  core-only build.
+- `ds_vk::viz` currently provides:
+  - `ColorRamp` with grayscale, blue-red, viridis, magma, and turbo-style
+    presets;
+  - `range_from_values` for finite scalar ranges;
+  - `draw_vector_field` for spans of positions/vectors and any draw sink that
+    supports `debug_arrow`;
+  - `draw_cross_marker`, a camera-facing X marker for selected points.
+- The app now generates a small swirling vector field over the floor and draws
+  it through `viz::draw_vector_field` with magnitude coloring. This keeps the
+  demo app useful as a visual smoke test for the plugin without baking field
+  semantics into the plugin.
+- Added tests for color-ramp clamping/normalization, scalar range scanning,
+  vector-field draw emission, and cross markers.
+
+### 2026-05-16 Picker Y Convention Fix
+
+- Daniel noticed that picker selection was not accurate. Comparing against
+  `dfsph_viewer` showed the bug: the framework used the usual OpenGL-style
+  screen Y conversion in `make_pick_ray`, but the camera projection already
+  contains the Vulkan Y flip (`proj[1][1] *= -1`). The correct mapping for this
+  projection is therefore `y_ndc = 2 * y / height - 1`, matching
+  `dfsph::ray_from_screen`.
+- The picker screen-segment projection had the matching inverse error. It now
+  maps projected NDC Y back to framebuffer pixels with
+  `(ndc.y * 0.5 + 0.5) * height`, again matching the DFSPh viewer's screen-space
+  picking code.
+- Retina/high-DPI scaling was already using the same shape as DFSPh:
+  SDL window coordinates are scaled by `SDL_GetWindowSizeInPixels /
+  SDL_GetWindowSize` before they are passed to the picker. No change was needed
+  there.
+- Removed the right-click line-connection experiment from the app and removed
+  the extra `FrameContext::input.right_click` field. Right click is back to
+  camera orbit only while picker correctness is being stabilized.
+- Added CPU tests that would have caught the mirror:
+  - upper framebuffer pixels ray toward world up;
+  - lower framebuffer pixels ray toward world down;
+  - left/right framebuffer pixels map to camera left/right;
+  - screen-segment picking uses the same Vulkan framebuffer Y convention.
+
+### 2026-05-16 PBR View Vector And Normal Debug
+
+- Daniel found a hard diagonal/geodesic-like shading split on the sphere when
+  metallic and roughness were both around 0.5.
+- The sphere vertex normals were not the main culprit: added CPU invariants now
+  verify UV sphere normals are radial, finite, unit length, and that
+  non-degenerate generated triangles wind outward.
+- The actual shader issue was that the interim PBR fragment shader used a fixed
+  hard-coded view vector. That makes metallic/specular response split across a
+  world-space plane instead of following the camera and fragment position.
+- The mesh vertex push block is now exactly 128 bytes containing view-projection
+  and model matrices. The vertex shader emits world position and computes its
+  normal matrix from the model matrix. The material storage-buffer record now
+  also carries camera position, and the fragment shader uses
+  `camera_position - world_position` for the view direction.
+- Added a global normal-color debug path in the app. It can be toggled in ImGui
+  with "Normal debug" or started from the CLI with `--normal-debug`, and it
+  applies `MeshDebugMode::normal` to all mesh draws.
+- Verified with normal and normal-debug screenshots:
+  `run/pbr_view_fix.png` and `run/normal_debug.png`.
+
+### 2026-05-16 Strong Color Types
+
+- Daniel pointed out that using `Vec4` as the public color type lets app code do
+  nonsensical vector arithmetic such as adding colors directly.
+- Mirrored the older `physically-based-animations` direction: colors are now
+  standalone array-backed types with accessors, while math-like color operations
+  are named helpers.
+- Added `ds_vk::Color` for float RGBA and `ds_vk::ColorU8` for packed 8-bit
+  RGBA, plus `to_vec4`, `to_color`, `to_color_u8`, `with_alpha`, and
+  `mix_color`.
+- Public mesh/material/debug/viz/runtime config APIs now use `Color`. Internal
+  Vulkan shader ABI structs still pack colors into `Vec4` because SPIR-V,
+  vertex input, and storage-buffer layout want four-component values.
+- Added tests for `mix_color`, float/u8 conversion, and a compile-time concept
+  check that `Color + Color` is not a valid expression.
+
+### 2026-05-16 Material Base-Color Textures
+
+- Added `TextureHandle`, `TextureLoadConfig`, and `MaterialTextures` so material
+  configs can use the designated-initializer shape:
+  `Material{.textures = {.base_color = texture}}`.
+- Vendored `stb_image.h` from `nothings/stb` for PNG/JPG texture loading. The
+  runtime now creates a 1x1 white fallback texture at slot 0 and exposes
+  `Runtime::load_texture(path, {.srgb = true})`.
+- The first material texture implementation uses a fixed combined-image-sampler
+  array rather than fully bindless descriptors. The table is currently 16
+  textures because the MoltenVK device used for validation reported
+  `maxPerStageDescriptorSamplers = 16`; an initial 32-slot table triggered
+  validation VUID `VkPipelineLayoutCreateInfo-descriptorType-03016`. That was a
+  design assumption bug, not a flaky test.
+- The runtime now guards startup with `maxPerStageDescriptorSamplers >= 16` so
+  the shader ABI and descriptor layout cannot silently exceed the device limit.
+  A future descriptor-indexing/bindless pass should make this configurable after
+  querying limits and feature bits.
+- Added UV coordinates to generated quads, cubes, and UV spheres. CPU tests now
+  check that generated mesh UVs are finite and normalized.
+- Integrated two CC0 Poly Haven diffuse maps into the app:
+  `concrete_floor_diff_1k.jpg` for the floor and
+  `wood_table_001_diff_1k.png` for the cube. The asset README records source
+  URLs and authorship/license notes.
+- Verified by rebuilding, running CPU tests, and rendering
+  `run/texture_materials.png`. The first screenshot run caught the sampler-limit
+  validation error above; after reducing the table to 16 the screenshot run was
+  clean and nonblank.

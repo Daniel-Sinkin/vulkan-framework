@@ -10,6 +10,21 @@ enum class ProjectionMode : u32
     orthographic = 1,
 };
 
+struct CameraConfig
+{
+    Vec3 pivot{0.0f, 0.0f, 0.5f};
+    f32 distance{5.0f};
+    f32 yaw{glm::radians(45.0f)};
+    f32 pitch{glm::radians(24.0f)};
+    f32 fov_y{glm::radians(55.0f)};
+    f32 orbit_sensitivity{1.0f};
+    f32 pivot_sensitivity{1.0f};
+    f32 zoom_sensitivity{1.0f};
+    f32 z_near{0.02f};
+    f32 z_far{200.0f};
+    ProjectionMode projection_mode{ProjectionMode::perspective};
+};
+
 struct Camera
 {
     Vec3 pivot{0.0f, 0.0f, 0.5f};
@@ -23,6 +38,8 @@ struct Camera
     f32 z_near{0.02f};
     f32 z_far{200.0f};
     ProjectionMode projection_mode{ProjectionMode::perspective};
+
+    auto configure(const CameraConfig& config) noexcept -> Camera&;
 
     [[nodiscard]] auto position() const noexcept -> Vec3;
     [[nodiscard]] auto view_matrix() const noexcept -> Mat4;

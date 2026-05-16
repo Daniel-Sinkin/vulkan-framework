@@ -24,10 +24,13 @@ is not a renderer abstraction layer, game engine, or cross-API project.
 
 ## Current Runtime Loop
 
-1. SDL polls input and ImGui consumes UI events.
+1. SDL polls input and ImGui consumes UI events. Left mouse clicks that are not
+   captured by ImGui are exposed through `FrameContext::input`.
 2. Camera controls update the shared `Camera`.
 3. The app receives `update(FrameContext&, dt)` if that method exists.
-4. The app appends mesh/debug commands to `FrameContext::draw`.
+4. The app appends mesh/debug commands to `FrameContext::draw`. Optional static
+   modules such as `ds_vk::Picker` can use the same frame data but stay outside
+   the runtime core.
 5. Built-in camera UI and the app's optional `draw_ui(FrameContext&)` build
    ImGui draw data.
 6. Built-in pipelines render meshes, debug segments, and ImGui.
@@ -35,15 +38,32 @@ is not a renderer abstraction layer, game engine, or cross-API project.
 
 ## Current Shader Interface
 
-- Mesh draws use a 128-byte vertex-stage push block: model-view-projection,
-  packed normal matrix, and per-draw color.
-- The first mesh fragment shader uses fixed light/view vectors with a small
-  Blinn-Phong specular term.
-- The first mesh pipeline intentionally has no descriptors. That keeps the first
-  app fast to iterate and leaves descriptor-indexing work for the material/resource
-  table pass.
+- Public color data uses `ds_vk::Color` and `ds_vk::ColorU8`, not `Vec4`.
+  Colors are array-backed standalone types with named conversion helpers such as
+  `to_vec4`, `to_color_u8`, `with_alpha`, and `mix_color`; generic vector
+  arithmetic is intentionally unavailable for colors.
+- Mesh draws use a 128-byte vertex-stage push block: view-projection and model
+  matrices. The vertex shader derives world position and a normal matrix from
+  the model matrix.
+- The first mesh pipeline binds a per-frame material storage buffer. The first
+  mesh fragment shader uses a fixed-light Cook-Torrance metallic/roughness
+  model and computes view direction from the actual camera position stored in
+  the material buffer. Each non-instanced draw passes its material index through
+  `firstInstance`/`gl_InstanceIndex`. Materials currently carry base color,
+  emissive color, metallic, roughness, ambient occlusion, and an optional
+  base-color texture handle.
+- Material textures are bound through a fixed 16-slot combined-image-sampler
+  table. Slot 0 is a generated white fallback; app-loaded texture handles occupy
+  later slots and materials opt into them with
+  `.textures = {.base_color = handle}`. The fixed size is deliberately matched
+  to the validated MoltenVK sampler limit before a later bindless pass.
+- Mesh draw configs also carry an `ObjectId` and `MeshDebugConfig`. Hidden draws
+  are culled before recording; selected/color-override/scalar-heatmap/normal/id
+  views are applied in the mesh fragment shader.
 - Debug segments use a separate 96-byte push block and one per-frame mapped
   segment buffer.
+- `ds_vk::viz` builds visual helpers on top of that debug segment path: color
+  ramps, scalar ranges, vector fields, and camera-facing cross markers.
 
 ## Repo Layout
 
@@ -73,9 +93,34 @@ that leaves the app with no recognized hook fails to compile.
 The app can stay high-level for simple work:
 
 ```cpp
-frame.draw.draw_mesh(mesh, transform, color);
-frame.draw.debug_arrow(origin, direction, color);
-frame.draw.debug_sphere(center, radius, color);
+runtime.camera({
+    .pivot = 0.7f * ds_vk::k_axis_z,
+    .distance = 5.4f,
+    .yaw = glm::radians(42.0f),
+    .pitch = glm::radians(25.0f),
+});
+
+frame.draw.draw_basic_mesh({
+    .mesh = mesh,
+    .color = color,
+});
+frame.draw.draw_mesh({
+    .mesh = mesh,
+    .transform = transform,
+    .object_id = {.value = 17u},
+    .material = {.base_color = color, .metallic = 0.2f, .roughness = 0.5f},
+    .debug = {.mode = ds_vk::MeshDebugMode::selected_pulse, .selected = is_selected},
+});
+frame.draw.debug_arrow({
+    .origin = origin,
+    .vector = direction,
+    .color = color,
+});
+frame.draw.debug_sphere({
+    .center = center,
+    .radius = radius,
+    .color = color,
+});
 ```
 
 It can also drop to Vulkan directly:
@@ -89,11 +134,80 @@ Mesh upload/replacement requires an initialized runtime, so app code should do i
 from `setup`, `update`, or UI callbacks during `run`, not before calling
 `Runtime::run`.
 
+## Selection Shape
+
+Selection is deliberately not an `on_click` callback on a mesh resource. A mesh
+can be rendered many times with different transforms, materials, masks, and app
+meaning, so selection is modeled as app-owned object IDs plus an optional static
+picker module. `ds_vk::Picker` owns only per-frame picking targets, not scene
+objects:
+
+```cpp
+ds_vk::Picker picker;
+
+picker.add_sphere({
+    .object_id = sphere_id,
+    .center = sphere_position,
+    .radius = sphere_radius,
+});
+picker.add_obb({
+    .object_id = cube_id,
+    .center = cube_position,
+    .half_extent = 0.5F * glm::abs(cube_scale),
+    .rotation = cube_rotation,
+});
+
+const auto hit = picker.click({
+    .camera = frame.camera,
+    .mouse_px = frame.input.left_click.position_px,
+    .viewport_px = {
+        static_cast<ds_vk::f32>(frame.extent.width),
+        static_cast<ds_vk::f32>(frame.extent.height),
+    },
+});
+```
+
+The app rebuilds picker targets from whatever collider shape makes sense for the
+current visualization, maps the returned `ObjectId` to its own state, and then
+passes `.debug = {.selected = true}` or `.debug = {.hidden = true}` through draw
+configs on later frames. The picker supports `click` for screen-space mouse
+input and `raycast` for code that already has a world ray. Current target shapes
+are sphere, AABB, OBB, capsule, and screen-space segment.
+
+The picker expects framebuffer pixel coordinates. The runtime converts SDL
+window coordinates to framebuffer coordinates with `SDL_GetWindowSizeInPixels /
+SDL_GetWindowSize`, which keeps Retina/high-DPI picking aligned with the
+swapchain. Because `Camera::projection_matrix` already applies Vulkan's Y flip,
+the pick ray maps screen Y using `y_ndc = 2 * y / height - 1`.
+
+The `viz` plugin deliberately remains visual grammar rather than app semantics.
+It does not know what SPH, rigid-body velocity, or neighborhood membership means;
+app code computes those values and passes positions, vectors, scalar ranges, and
+selected endpoints into reusable helpers:
+
+```cpp
+viz::draw_vector_field(frame.draw, {
+    .positions = std::span<const ds_vk::Vec3>{positions},
+    .vectors = std::span<const ds_vk::Vec3>{velocities},
+    .scale = 0.04f,
+    .color_by_magnitude = true,
+    .color_ramp = speed_ramp,
+});
+
+viz::draw_cross_marker(frame.draw, {
+    .camera = frame.camera,
+    .center = selected_hit_position,
+});
+```
+
 ## Near-Term Roadmap
 
-- Descriptor indexing support path: feature-gated query/enablement exists now;
-  add a resource table for textures/storage buffers once a real app needs it.
+- Descriptor indexing/bindless support path: feature-gated query/enablement
+  exists now; replace the fixed 16-slot material texture table once an app needs
+  larger texture/storage-buffer sets.
 - Pipeline cache and shader reload.
 - Instanced mesh buckets for repeated cube/sphere visualization.
+- A render-target object-id picking path for dense scenes where CPU
+  sphere/AABB candidates are not enough.
 - More debug primitives: box, basis triad, text labels.
 - glTF mesh loading, likely from the SPH viewer once this base runtime is stable.

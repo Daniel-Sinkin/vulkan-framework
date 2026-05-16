@@ -56,6 +56,7 @@ add_subdirectory(external/glm EXCLUDE_FROM_ALL)
 set(DS_VK_CORE_SOURCES
   ds_vk/camera.cpp
   ds_vk/mesh.cpp
+  ds_vk/selection.cpp
 )
 
 add_library(ds_vk_core STATIC ${DS_VK_CORE_SOURCES})
@@ -65,10 +66,28 @@ target_include_directories(ds_vk_core PUBLIC
 target_link_libraries(ds_vk_core PUBLIC glm::glm)
 target_link_libraries(ds_vk_core PRIVATE ds_vk_warnings)
 
+add_library(ds_vk_picker STATIC
+  ds_vk/plugins/picker.cpp
+)
+target_include_directories(ds_vk_picker PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(ds_vk_picker PUBLIC ds_vk_core)
+target_link_libraries(ds_vk_picker PRIVATE ds_vk_warnings)
+
+add_library(ds_vk_viz STATIC
+  ds_vk/plugins/viz.cpp
+)
+target_include_directories(ds_vk_viz PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(ds_vk_viz PUBLIC ds_vk_core)
+target_link_libraries(ds_vk_viz PRIVATE ds_vk_warnings)
+
 if(DS_VK_BUILD_TESTS)
   enable_testing()
   add_executable(ds_vk_tests tests/test_main.cpp)
-  target_link_libraries(ds_vk_tests PRIVATE ds_vk_core ds_vk_warnings)
+  target_link_libraries(ds_vk_tests PRIVATE ds_vk_picker ds_vk_viz ds_vk_warnings)
   add_test(NAME ds_vk_tests COMMAND ds_vk_tests)
 endif()
 
@@ -153,7 +172,10 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
   target_link_libraries(ds_vk PRIVATE ds_vk_warnings)
 
   add_executable(ds_vk_basic_app app/main.cpp)
-  target_link_libraries(ds_vk_basic_app PRIVATE ds_vk ds_vk_warnings)
+  target_compile_definitions(ds_vk_basic_app PRIVATE
+    DS_VK_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+  )
+  target_link_libraries(ds_vk_basic_app PRIVATE ds_vk ds_vk_picker ds_vk_viz ds_vk_warnings)
 
   if(DS_VK_BUILD_TESTS)
     add_executable(ds_vk_runtime_tests tests/test_runtime.cpp)
