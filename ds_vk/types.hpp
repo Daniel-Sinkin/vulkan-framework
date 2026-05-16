@@ -209,8 +209,8 @@ struct ObjectId
     }
 };
 
-inline constexpr auto k_axis_x = Vec3{1.0f, 0.0f, 0.0f};
-inline constexpr auto k_axis_y = Vec3{0.0f, 1.0f, 0.0f};
-inline constexpr auto k_axis_z = Vec3{0.0f, 0.0f, 1.0f};
-inline constexpr auto k_quat_identity = Quat{1.0f, 0.0f, 0.0f, 0.0f};
+inline constexpr Vec3 k_axis_x{1.0f, 0.0f, 0.0f};
+inline constexpr Vec3 k_axis_y{0.0f, 1.0f, 0.0f};
+inline constexpr Vec3 k_axis_z{0.0f, 0.0f, 1.0f};
+inline constexpr Quat k_quat_identity{1.0f, 0.0f, 0.0f, 0.0f};
 }  // namespace ds_vk

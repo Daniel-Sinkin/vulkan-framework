@@ -68,6 +68,7 @@ struct VectorFieldConfig
     ColorRamp color_ramp{};
     f32 min_vector_length{1.0e-5f};
     usize max_vectors{std::numeric_limits<usize>::max()};
+    bool draw_on_top{};
 };
 
 struct CrossMarkerConfig
@@ -118,6 +119,7 @@ auto draw_vector_field(DrawSink& draw, const VectorFieldConfig& config) -> usize
                     .vector = vector * config.scale,
                     .color = color,
                     .width = config.width,
+                    .draw_on_top = config.draw_on_top,
                 }
             );
             ++drawn;

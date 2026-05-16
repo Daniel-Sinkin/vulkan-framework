@@ -25,7 +25,7 @@ using namespace ds_vk;
 #    define DS_VK_ASSET_DIR "assets"
 #endif
 
-constexpr auto k_selection_color = Color{1.0f, 0.0f, 0.85f, 0.86f};
+constexpr Color k_selection_color{1.0f, 0.0f, 0.85f, 0.86f};
 
 [[nodiscard]] auto asset_path(const std::filesystem::path& relative) -> std::filesystem::path
 {
@@ -303,7 +303,7 @@ class BasicViewerApp final
         draw_selection_window();
     }
 
-    auto set_normal_debug(const bool enabled) noexcept -> void
+    auto set_normal_debug(bool enabled) noexcept -> void
     {
         show_normal_debug_ = enabled;
         if (enabled)
@@ -312,7 +312,7 @@ class BasicViewerApp final
         }
     }
 
-    auto set_camera_depth_debug(const bool enabled) noexcept -> void
+    auto set_camera_depth_debug(bool enabled) noexcept -> void
     {
         show_camera_depth_debug_ = enabled;
         if (enabled)
@@ -330,7 +330,7 @@ class BasicViewerApp final
     [[nodiscard]] auto object_debug_config(ObjectId object_id, bool hidden = false) const noexcept
         -> MeshDebugConfig
     {
-        auto debug = MeshDebugConfig{.hidden = hidden};
+        MeshDebugConfig debug{.hidden = hidden};
         if (show_camera_depth_debug_ and !hidden)
         {
             const auto& cfg = camera_depth_debug_cfg_;
@@ -590,7 +590,7 @@ class BasicViewerApp final
                 const auto yf = static_cast<f32>(y) * 0.58f;
                 const auto radius_squared = xf * xf + yf * yf;
                 const auto lift = 0.30f + 0.16f * std::sin(1.4f * xf) * std::cos(1.2f * yf);
-                const auto tangent = Vec3{-yf, xf, 0.38f * std::cos(0.7f * radius_squared)};
+                const Vec3 tangent{-yf, xf, 0.38f * std::cos(0.7f * radius_squared)};
                 const auto direction = normalize_or(tangent, k_axis_z);
                 const auto strength = 0.35f + 0.58f * std::exp(-0.16f * radius_squared);
                 vector_field_positions_.emplace_back(xf, yf, lift);
@@ -787,16 +787,16 @@ auto print_usage(const char* executable) -> void
 }
 }  // namespace
 
-auto main(const int argc, char** argv) -> int
+auto main(int argc, char** argv) -> int
 {
     try
     {
-        auto config = ds_vk::RuntimeConfig{.window_title = "ds_vk Basic Viewer"};
+        ds_vk::RuntimeConfig config{.window_title = "ds_vk Basic Viewer"};
         auto start_normal_debug = false;
         auto start_depth_debug = false;
         for (auto i = 1; i < argc; ++i)
         {
-            const auto arg = std::string_view{argv[i]};
+            const std::string_view arg{argv[i]};
             if (arg == "--help")
             {
                 print_usage(argv[0]);
@@ -834,10 +834,10 @@ auto main(const int argc, char** argv) -> int
             }
         }
 
-        auto app = BasicViewerApp{};
+        BasicViewerApp app{};
         app.set_normal_debug(start_normal_debug);
         app.set_camera_depth_debug(start_depth_debug);
-        auto runtime = ds_vk::Runtime{std::move(config)};
+        ds_vk::Runtime runtime{std::move(config)};
         return runtime.run(app);
     }
     catch (const std::exception& error)

@@ -20,7 +20,7 @@ struct FaceDistance
 
 [[nodiscard]] auto aabb_normal_at(Vec3 position, Vec3 box_min, Vec3 box_max) noexcept -> Vec3
 {
-    const auto face_distances = std::array{
+    const std::array face_distances{
         FaceDistance{.distance = std::abs(position.x - box_min.x), .normal = -k_axis_x},
         FaceDistance{.distance = std::abs(position.x - box_max.x), .normal = k_axis_x},
         FaceDistance{.distance = std::abs(position.y - box_min.y), .normal = -k_axis_y},
@@ -44,8 +44,8 @@ auto make_camera_ray(const Camera& camera, Vec2 cursor_px, Vec2 viewport_px) noe
     const auto ndc_y = 2.0f * cursor_px.y / viewport.y - 1.0f;
     const auto aspect = viewport.x / viewport.y;
     const auto inverse_view_projection = glm::inverse(camera.view_projection_matrix(aspect));
-    const auto near_clip = Vec4{ndc_x, ndc_y, 0.0f, 1.0f};
-    const auto far_clip = Vec4{ndc_x, ndc_y, 1.0f, 1.0f};
+    const Vec4 near_clip{ndc_x, ndc_y, 0.0f, 1.0f};
+    const Vec4 far_clip{ndc_x, ndc_y, 1.0f, 1.0f};
     auto near_world = inverse_view_projection * near_clip;
     auto far_world = inverse_view_projection * far_clip;
     near_world /= near_world.w;
@@ -90,7 +90,7 @@ auto intersect_aabb(const Ray& ray, const Aabb& aabb) noexcept -> std::optional<
     auto t_min = 0.0f;
     auto t_max = std::numeric_limits<f32>::max();
     auto hit = true;
-    for (auto axis = 0; axis < 3 and hit; ++axis)
+    for (Vec3::length_type axis{0}; axis < Vec3::length_type{3} and hit; ++axis)
     {
         const auto origin = ray.origin[axis];
         const auto direction = ray.direction[axis];
@@ -180,7 +180,7 @@ auto hit_aabb(const Ray& ray, const Aabb& aabb) noexcept -> std::optional<RayHit
 auto hit_obb(const Ray& ray, const Obb& obb) noexcept -> std::optional<RayHit>
 {
     const auto inverse_rotation = glm::inverse(obb.rotation);
-    const auto local_ray = Ray{
+    const Ray local_ray{
         .origin = inverse_rotation * (ray.origin - obb.center),
         .direction = normalize_or(inverse_rotation * ray.direction, ray.direction),
     };

@@ -4,6 +4,7 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -bugprone-invalid-enum-default-initialization,
   clang-analyzer-*,
+  cppcoreguidelines-narrowing-conversions,
   cppcoreguidelines-avoid-goto,
   cppcoreguidelines-pro-type-member-init,
   modernize-*,
@@ -14,7 +15,7 @@ Checks: >
   readability-identifier-naming,
   readability-inconsistent-declaration-parameter-name,
   readability-use-anyofallof
-WarningsAsErrors: ''
+WarningsAsErrors: '*'
 HeaderFilterRegex: '^(ds_vk|app|tests)/'
 CheckOptions:
   - key: readability-identifier-naming.NamespaceCase

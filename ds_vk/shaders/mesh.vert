@@ -7,6 +7,19 @@ layout(push_constant) uniform PushConstants
 }
 pc;
 
+struct MeshInstance
+{
+    mat4 model;
+    mat4 normal_model;
+    uint material_index;
+};
+
+layout(set = 0, binding = 4) readonly buffer MeshInstanceBuffer
+{
+    MeshInstance instances[];
+}
+instance_buffer;
+
 layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec4 in_color;
@@ -20,12 +33,12 @@ layout(location = 4) out vec2 out_texcoord;
 
 void main()
 {
-    vec4 world_position = pc.model * vec4(in_position, 1.0);
-    mat3 normal_matrix = transpose(inverse(mat3(pc.model)));
+    MeshInstance instance = instance_buffer.instances[gl_InstanceIndex];
+    vec4 world_position = instance.model * vec4(in_position, 1.0);
     gl_Position = pc.view_projection * world_position;
-    out_normal = normalize(normal_matrix * in_normal);
+    out_normal = normalize(mat3(instance.normal_model) * in_normal);
     out_color = in_color;
-    out_material_index = uint(gl_InstanceIndex);
+    out_material_index = instance.material_index;
     out_world_position = world_position.xyz;
     out_texcoord = in_texcoord;
 }

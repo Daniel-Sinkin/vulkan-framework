@@ -2,6 +2,8 @@
 #include "ds_vk/assets.hpp"
 #include "ds_vk/math.hpp"
 #include "ds_vk/mesh.hpp"
+#include "ds_vk/plugins/manipulator.hpp"
+#include "ds_vk/plugins/picker.hpp"
 #include "ds_vk/plugins/viz.hpp"
 #include "ds_vk/runtime.hpp"
 #include "ds_vk/types.hpp"
@@ -14,6 +16,7 @@
 #include <imgui.h>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -32,8 +35,25 @@ struct PbaDebugConfig
 {
     bool speed_coloring{true};
     bool velocity_arrows{true};
+    bool velocity_arrows_on_top{true};
     f32 velocity_arrow_scale{0.08f};
     usize max_velocity_arrows{256zu};
+};
+
+struct PbaForceConfig
+{
+    bool gravity_enabled{true};
+    Vec3 gravity_accel{-9.81f * k_axis_z};
+    bool attractor_enabled{};
+    Vec3 attractor_target{0.0f, 0.0f, 2.4f};
+    f32 attractor_magnitude{8.0f};
+    bool repulsion_enabled{};
+    Vec3 repulsion_target{};
+    f32 repulsion_accel_max{16.0f};
+    f32 repulsion_range{3.0f};
+    bool nbody_enabled{};
+    f32 nbody_g{0.12f};
+    f32 nbody_softening{0.35f};
 };
 
 [[nodiscard]] auto asset_path(const std::filesystem::path& relative) -> std::filesystem::path
@@ -93,6 +113,17 @@ class PbaPyramidApp
         {
             paused_ = !paused_;
         }
+        picker_.clear();
+        register_pick_targets();
+        const auto was_manipulating = manipulator_.active();
+        update_manipulator(frame);
+        if (!was_manipulating and !manipulator_.active())
+        {
+            handle_selection_click(frame);
+        }
+        sync_grabbed_flags();
+
+        configure_forces();
         if (!paused_)
         {
             accumulator_ += std::min(dt_seconds, 0.08f) * simulation_speed_;
@@ -102,6 +133,7 @@ class PbaPyramidApp
                 accumulator_ -= ds_vk_app::pba::k_fixed_dt;
             }
         }
+        sync_grabbed_flags();
 
         configure_lighting(frame.draw);
         frame.draw.draw_mesh({
@@ -154,6 +186,7 @@ class PbaPyramidApp
             const auto& body = bodies[i];
             const auto color =
                 debug_.speed_coloring ? speed_ramp_.sample(speed_values_[i]) : body.color;
+            const auto selected = is_selected(body.object_id);
             frame.draw.draw_mesh({
                 .mesh = cube_mesh_,
                 .object_id = body.object_id,
@@ -170,7 +203,7 @@ class PbaPyramidApp
                         .roughness = 0.62f,
                     },
                 .debug = MeshDebugConfig{
-                    .selected = body.object_id.value == selected_id_.value,
+                    .selected = selected,
                 },
             });
             if (show_bounds_)
@@ -203,6 +236,7 @@ class PbaPyramidApp
                     .color_by_magnitude = true,
                     .color_ramp = speed_ramp_,
                     .max_vectors = debug_.max_velocity_arrows,
+                    .draw_on_top = debug_.velocity_arrows_on_top,
                 }
             );
         }
@@ -211,10 +245,9 @@ class PbaPyramidApp
     auto draw_ui(FrameContext&) -> void
     {
         ImGui::SetNextWindowPos(ImVec2{18.0f, 280.0f}, ImGuiCond_Once);
-        ImGui::SetNextWindowSize(ImVec2{440.0f, 330.0f}, ImGuiCond_Once);
+        ImGui::SetNextWindowSize(ImVec2{470.0f, 520.0f}, ImGuiCond_Once);
         if (ImGui::Begin("PBA Pyramid"))
         {
-            ImGui::Text("Space toggles simulation pause");
             ImGui::Checkbox("Paused", &paused_);
             ImGui::SliderFloat("Simulation speed", &simulation_speed_, 0.0f, 4.0f, "%.2f");
             if (ImGui::Button("Reset pyramid"))
@@ -224,6 +257,7 @@ class PbaPyramidApp
             ImGui::Separator();
             ImGui::Checkbox("Speed coloring", &debug_.speed_coloring);
             ImGui::Checkbox("Velocity arrows", &debug_.velocity_arrows);
+            ImGui::Checkbox("Velocity arrows on top", &debug_.velocity_arrows_on_top);
             ImGui::SliderFloat("Arrow scale", &debug_.velocity_arrow_scale, 0.0f, 0.25f, "%.3f");
             auto max_arrows = static_cast<int>(debug_.max_velocity_arrows);
             if (ImGui::SliderInt("Max arrows", &max_arrows, 0, 512))
@@ -232,16 +266,39 @@ class PbaPyramidApp
             }
             ImGui::Checkbox("AABB bounds", &show_bounds_);
             ImGui::Separator();
+            ImGui::Checkbox("Gravity", &forces_.gravity_enabled);
+            ImGui::DragFloat3("Gravity accel", &forces_.gravity_accel.x, 0.05f);
+            ImGui::Checkbox("Attractor", &forces_.attractor_enabled);
+            ImGui::DragFloat3("Attractor target", &forces_.attractor_target.x, 0.05f);
+            ImGui::SliderFloat(
+                "Attractor magnitude", &forces_.attractor_magnitude, 0.0f, 40.0f, "%.2f"
+            );
+            ImGui::Checkbox("Repulsion", &forces_.repulsion_enabled);
+            ImGui::DragFloat3("Repulsion target", &forces_.repulsion_target.x, 0.05f);
+            ImGui::SliderFloat(
+                "Repulsion accel", &forces_.repulsion_accel_max, 0.0f, 60.0f, "%.2f"
+            );
+            ImGui::SliderFloat("Repulsion range", &forces_.repulsion_range, 0.2f, 8.0f, "%.2f");
+            ImGui::Checkbox("N-body", &forces_.nbody_enabled);
+            ImGui::SliderFloat("N-body G", &forces_.nbody_g, 0.0f, 3.0f, "%.3f");
+            ImGui::Separator();
             auto& physics = simulation_.physics();
             ImGui::SliderFloat("Restitution", &physics.restitution, 0.0f, 0.8f, "%.2f");
             ImGui::SliderFloat("Friction", &physics.friction, 0.0f, 1.0f, "%.2f");
             ImGui::SliderFloat("Damping", &physics.linear_damping, 0.0f, 0.5f, "%.3f");
+            ImGui::SliderFloat("Angular damping", &physics.angular_damping, 0.0f, 0.8f, "%.3f");
             auto iterations = static_cast<int>(physics.solver_iterations);
             if (ImGui::SliderInt("Solver iterations", &iterations, 1, 12))
             {
                 physics.solver_iterations = static_cast<u32>(std::max(1, iterations));
             }
             ImGui::Text("Bodies: %zu", simulation_.bodies().size());
+            ImGui::Text("Selected: %zu", selected_ids_.size());
+            ImGui::Text(
+                "Broadphase: %zu / %zu",
+                simulation_.last_step_stats().broadphase_candidates,
+                simulation_.last_step_stats().body_pair_count
+            );
             ImGui::Text("Steps: %zu", simulation_.step_count());
         }
         ImGui::End();
@@ -254,7 +311,194 @@ class PbaPyramidApp
         accumulator_ = 0.0f;
         if (!simulation_.bodies().empty())
         {
-            selected_id_ = simulation_.bodies().back().object_id;
+            selected_ids_ = {simulation_.bodies().back().object_id};
+        }
+    }
+
+    auto configure_forces() -> void
+    {
+        auto& physics = simulation_.physics();
+        physics.simple_forces.clear();
+        physics.complex_forces.clear();
+        if (forces_.gravity_enabled)
+        {
+            physics.simple_forces.emplace_back(
+                ds_vk_app::pba::GravityForce{.accel = forces_.gravity_accel}
+            );
+        }
+        if (forces_.attractor_enabled)
+        {
+            physics.simple_forces.emplace_back(
+                ds_vk_app::pba::AttractorForce{
+                    .target = forces_.attractor_target,
+                    .magnitude = forces_.attractor_magnitude,
+                }
+            );
+        }
+        if (forces_.repulsion_enabled)
+        {
+            physics.simple_forces.emplace_back(
+                ds_vk_app::pba::RepulsionForce{
+                    .target = forces_.repulsion_target,
+                    .accel_max = forces_.repulsion_accel_max,
+                    .range = forces_.repulsion_range,
+                }
+            );
+        }
+        if (forces_.nbody_enabled)
+        {
+            physics.complex_forces.emplace_back(
+                ds_vk_app::pba::NBodyForce{
+                    .g = forces_.nbody_g,
+                    .softening = forces_.nbody_softening,
+                }
+            );
+        }
+    }
+
+    auto register_pick_targets() -> void
+    {
+        for (const auto& body : simulation_.bodies())
+        {
+            (void) picker_.add_obb({
+                .object_id = body.object_id,
+                .obb = Obb{
+                    .center = body.position,
+                    .half_extent = body.half_extent,
+                    .rotation = body.orientation,
+                },
+            });
+        }
+    }
+
+    [[nodiscard]] auto is_selected(ObjectId id) const noexcept -> bool
+    {
+        return std::ranges::any_of(
+            selected_ids_, [id](ObjectId selected) noexcept { return selected.value == id.value; }
+        );
+    }
+
+    auto toggle_selection(ObjectId id) -> void
+    {
+        const auto iter = std::ranges::find_if(
+            selected_ids_, [id](ObjectId selected) noexcept { return selected.value == id.value; }
+        );
+        if (iter == selected_ids_.end())
+        {
+            selected_ids_.push_back(id);
+            return;
+        }
+        selected_ids_.erase(iter);
+    }
+
+    auto handle_selection_click(const FrameContext& frame) -> void
+    {
+        if (!frame.input.left_click.occurred)
+        {
+            return;
+        }
+        const auto hit = picker_.click({
+            .camera = frame.camera,
+            .mouse_px = frame.input.left_click.position_px,
+            .viewport_px = Vec2{
+                static_cast<f32>(frame.extent.width),
+                static_cast<f32>(frame.extent.height),
+            },
+        });
+        if (!hit.has_value())
+        {
+            if (!frame.input.left_click.modifiers.shift)
+            {
+                selected_ids_.clear();
+            }
+            return;
+        }
+        if (frame.input.left_click.modifiers.shift)
+        {
+            toggle_selection(hit->object_id);
+            return;
+        }
+        selected_ids_ = {hit->object_id};
+    }
+
+    [[nodiscard]] auto transform_for(ObjectId id) const -> std::optional<Transform>
+    {
+        const auto* body = simulation_.find_body(id);
+        if (body == nullptr)
+        {
+            return std::nullopt;
+        }
+        return Transform{
+            .translation = body->position,
+            .rotation = body->orientation,
+            .scale = 2.0f * body->half_extent,
+        };
+    }
+
+    auto set_transform_for(ObjectId id, const Transform& transform) -> void
+    {
+        auto* body = simulation_.find_body(id);
+        if (body == nullptr)
+        {
+            return;
+        }
+        body->position = transform.translation;
+        body->previous_position = transform.translation;
+        body->velocity = {};
+        body->angular_velocity = {};
+        body->force_accum = {};
+        body->torque_accum = {};
+        body->orientation = glm::normalize(transform.rotation);
+        body->half_extent = 0.5f * glm::max(glm::abs(transform.scale), Vec3{0.08f});
+        body->grabbed = true;
+    }
+
+    auto update_manipulator(const FrameContext& frame) -> void
+    {
+        manipulator_.update({
+            .input =
+                ManipulatorInput{
+                    .camera = frame.camera,
+                    .mouse_px = frame.input.mouse_px,
+                    .viewport_px =
+                        Vec2{
+                            static_cast<f32>(frame.extent.width),
+                            static_cast<f32>(frame.extent.height),
+                        },
+                    .mouse_captured_by_ui = frame.input.mouse_captured_by_ui,
+                    .translate_pressed = frame.input.key_g_pressed,
+                    .rotate_pressed = frame.input.key_r_pressed,
+                    .scale_pressed = frame.input.key_s_pressed,
+                    .x_pressed = frame.input.key_x_pressed,
+                    .y_pressed = frame.input.key_y_pressed,
+                    .z_pressed = frame.input.key_z_pressed,
+                    .confirm_pressed =
+                        frame.input.left_click.occurred or frame.input.key_enter_pressed,
+                    .cancel_pressed = frame.input.key_c_pressed,
+                },
+            .selected_ids = std::span<const ObjectId>{selected_ids_},
+            .callbacks = ManipulatorCallbacks{
+                .get_transform = [this](ObjectId id) -> std::optional<Transform>
+                { return transform_for(id); },
+                .set_transform = [this](ObjectId id, const Transform& transform) -> void
+                { set_transform_for(id, transform); },
+            },
+        });
+    }
+
+    auto sync_grabbed_flags() -> void
+    {
+        for (auto& body : simulation_.bodies())
+        {
+            body.grabbed = manipulator_.active() and is_selected(body.object_id);
+            if (!body.grabbed)
+            {
+                continue;
+            }
+            body.velocity = {};
+            body.angular_velocity = {};
+            body.force_accum = {};
+            body.torque_accum = {};
         }
     }
 
@@ -278,13 +522,16 @@ class PbaPyramidApp
     MeshHandle cube_mesh_{};
     MeshHandle floor_mesh_{};
     MeshHandle gltf_marker_mesh_{};
+    Picker picker_{};
+    Manipulator manipulator_{};
     ds_vk_app::pba::PyramidSimulation simulation_{};
     std::vector<Vec3> velocity_positions_{};
     std::vector<Vec3> velocity_vectors_{};
     std::vector<f32> speed_values_{};
     viz::ColorRamp speed_ramp_{};
     PbaDebugConfig debug_{};
-    ObjectId selected_id_{};
+    PbaForceConfig forces_{};
+    std::vector<ObjectId> selected_ids_{};
     f32 accumulator_{};
     f32 simulation_speed_{1.0f};
     bool paused_{false};
@@ -292,11 +539,11 @@ class PbaPyramidApp
 };
 }  // namespace
 
-auto main(const int argc, char** argv) -> int
+auto main(int argc, char** argv) -> int
 {
     try
     {
-        auto config = RuntimeConfig{
+        RuntimeConfig config{
             .window_title = "ds_vk PBA pyramid",
             .initial_width = 1280u,
             .initial_height = 820u,
@@ -304,7 +551,7 @@ auto main(const int argc, char** argv) -> int
         };
         for (auto i = 1; i < argc; ++i)
         {
-            const auto arg = std::string_view{argv[i]};
+            const std::string_view arg{argv[i]};
             if (arg == "--help")
             {
                 print_usage(argv[0]);
@@ -333,8 +580,8 @@ auto main(const int argc, char** argv) -> int
             }
         }
 
-        auto runtime = Runtime{std::move(config)};
-        auto app = PbaPyramidApp{};
+        Runtime runtime{std::move(config)};
+        PbaPyramidApp app{};
         return runtime.run(app);
     }
     catch (const std::exception& error)

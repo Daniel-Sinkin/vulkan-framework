@@ -11,6 +11,7 @@ struct DebugLineConfig
     Vec3 end{};
     Color color{Color::white};
     f32 width{0.012f};
+    bool draw_on_top{};
 };
 
 struct DebugArrowConfig
@@ -19,6 +20,7 @@ struct DebugArrowConfig
     Vec3 vector{};
     Color color{Color::white};
     f32 width{0.016f};
+    bool draw_on_top{};
 };
 
 struct DebugSphereConfig
@@ -28,6 +30,7 @@ struct DebugSphereConfig
     Color color{Color::white};
     u32 segments{32u};
     f32 width{0.010f};
+    bool draw_on_top{};
 };
 
 struct DebugSegment

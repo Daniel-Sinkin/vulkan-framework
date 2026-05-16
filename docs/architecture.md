@@ -103,12 +103,16 @@ is not a renderer abstraction layer, game engine, or cross-API project.
   `ds_vk::viz` without making vector fields part of the runtime core.
 - `ds_vk_dfsph_app` is a fixed-data DFSPH playback user. It loads the vendored
   small-dambreak VTK history from `assets/dfsph/.../vtk`, renders particles as
-  mesh draws, and uses `ds_vk::viz` for velocity arrows and bounds markers. It
-  does not vendor SPlisHSPlasH or generate scenes on demand.
+  mesh draws, can preload decoded CPU surface meshes for the mesh view, and uses
+  `ds_vk::viz` for velocity arrows and bounds markers. It does not vendor
+  SPlisHSPlasH or generate scenes on demand.
 - `ds_vk_pba_app` is a realtime rigid-body visualization user. Space toggles
   simulation pause while camera controls continue to work. Its pyramid physics
-  is an app-side MVP AABB solver, with speed coloring and velocity arrows routed
-  through `ds_vk::viz`.
+  is an app-side MVP AABB solver with force accumulators, a small force set,
+  grabbed-body handling, and sweep-and-prune broadphase stats. Speed coloring
+  and velocity arrows are routed through `ds_vk::viz`; selection uses
+  `ds_vk::picker`, and object manipulation uses the callback-based
+  `ds_vk::Manipulator` plugin.
 
 ## Asset Loading
 

@@ -33,7 +33,7 @@ enum class VectorfieldExample : u8
 };
 
 constexpr auto k_example_count = static_cast<usize>(VectorfieldExample::count);
-constexpr auto k_vector_target_id = ObjectId{.value = 700u};
+constexpr ObjectId k_vector_target_id{.value = 700u};
 constexpr auto k_invalid_selected_vector = k_invalid_index;
 
 [[nodiscard]] auto example_name(VectorfieldExample example) noexcept -> const char*
@@ -110,7 +110,7 @@ constexpr auto k_invalid_selected_vector = k_invalid_index;
 [[nodiscard]] auto lorenz_visual_field(Vec3 p, f32) noexcept -> Vec3
 {
     constexpr auto visual_scale = 0.035f;
-    constexpr auto visual_offset = Vec3{0.0f, 0.0f, -0.6f};
+    constexpr Vec3 visual_offset{0.0f, 0.0f, -0.6f};
     constexpr auto trajectory_speed_scale = 0.18f;
     const auto raw = (p - visual_offset) / visual_scale;
     return visual_scale * trajectory_speed_scale * lorenz_rhs(raw);
@@ -158,10 +158,10 @@ advect_from_time(Vec3 p, f32 start_time, f32 duration_seconds, VectorfieldExampl
         return p;
     }
 
-    const auto steps = std::max(1, static_cast<int>(std::ceil(duration * k_steps_per_second)));
+    const auto steps = static_cast<usize>(std::max(1.0f, std::ceil(duration * k_steps_per_second)));
     const auto dt = duration_seconds / static_cast<f32>(steps);
     auto time = start_time;
-    for (auto i = 0; i < steps; ++i)
+    for (auto i = 0zu; i < steps; ++i)
     {
         p = rk4_step(p, time, dt, example);
         time += dt;
@@ -369,7 +369,7 @@ class VectorfieldApp final
         const auto spacing = std::max(0.05f, config_.sample_spacing);
         const auto axis_count = [spacing](f32 axis_extent) noexcept -> u32
         { return static_cast<u32>(std::floor((2.0f * axis_extent) / spacing)) + 1u; };
-        const auto counts = glm::uvec3{
+        const glm::uvec3 counts{
             axis_count(extent.x),
             axis_count(extent.y),
             axis_count(extent.z),
@@ -496,7 +496,7 @@ class VectorfieldApp final
     auto draw_bounds(DrawList& draw) const -> void
     {
         const auto e = config_.sample_extent;
-        const auto corners = std::array{
+        const std::array corners{
             Vec3{-e.x, -e.y, -e.z},
             Vec3{e.x, -e.y, -e.z},
             Vec3{e.x, e.y, -e.z},
@@ -506,7 +506,7 @@ class VectorfieldApp final
             Vec3{e.x, e.y, e.z},
             Vec3{-e.x, e.y, e.z},
         };
-        constexpr auto edges = std::array{
+        constexpr std::array edges{
             std::array{0zu, 1zu},
             std::array{1zu, 2zu},
             std::array{2zu, 3zu},
@@ -549,7 +549,7 @@ class VectorfieldApp final
 
     [[nodiscard]] auto trail_points(Vec3 seed) const -> std::vector<Vec3>
     {
-        auto points = std::vector<Vec3>{};
+        std::vector<Vec3> points{};
         const auto step_count = std::max(2u, config_.trail_steps);
         points.reserve(static_cast<usize>(step_count));
         const auto end_time = std::max(0.0f, config_.time_seconds);
@@ -670,7 +670,7 @@ class VectorfieldApp final
 
     auto draw_color_combo() -> void
     {
-        constexpr auto presets = std::array{
+        constexpr std::array presets{
             viz::ColorPreset::turbo,
             viz::ColorPreset::viridis,
             viz::ColorPreset::magma,
@@ -748,10 +748,10 @@ auto main(int argc, char** argv) -> int
 {
     try
     {
-        auto config = RuntimeConfig{.window_title = "ds_vk Vectorfield"};
+        RuntimeConfig config{.window_title = "ds_vk Vectorfield"};
         for (auto i = 1; i < argc; ++i)
         {
-            const auto arg = std::string_view{argv[i]};
+            const std::string_view arg{argv[i]};
             if (arg == "--help")
             {
                 print_usage(argv[0]);
@@ -782,8 +782,8 @@ auto main(int argc, char** argv) -> int
             return 2;
         }
 
-        auto runtime = Runtime{config};
-        auto app = VectorfieldApp{};
+        Runtime runtime{config};
+        VectorfieldApp app{};
         return runtime.run(app);
     }
     catch (const std::exception& e)

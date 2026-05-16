@@ -111,7 +111,7 @@ auto sample_color(ColorPreset preset, f32 normalized_value) noexcept -> Color
             return grayscale(normalized_value);
         case ColorPreset::blue_red:
             {
-                static constexpr auto stops = std::array{
+                static constexpr std::array stops{
                     ColorStop{.t = 0.00f, .color = {0.10f, 0.18f, 0.84f}},
                     ColorStop{.t = 0.25f, .color = {0.12f, 0.68f, 0.92f}},
                     ColorStop{.t = 0.50f, .color = {0.96f, 0.96f, 0.90f}},
@@ -122,7 +122,7 @@ auto sample_color(ColorPreset preset, f32 normalized_value) noexcept -> Color
             }
         case ColorPreset::viridis:
             {
-                static constexpr auto stops = std::array{
+                static constexpr std::array stops{
                     ColorStop{.t = 0.00f, .color = {0.267f, 0.005f, 0.329f}},
                     ColorStop{.t = 0.15f, .color = {0.283f, 0.141f, 0.458f}},
                     ColorStop{.t = 0.30f, .color = {0.254f, 0.265f, 0.530f}},
@@ -135,7 +135,7 @@ auto sample_color(ColorPreset preset, f32 normalized_value) noexcept -> Color
             }
         case ColorPreset::magma:
             {
-                static constexpr auto stops = std::array{
+                static constexpr std::array stops{
                     ColorStop{.t = 0.00f, .color = {0.001f, 0.000f, 0.014f}},
                     ColorStop{.t = 0.17f, .color = {0.111f, 0.064f, 0.262f}},
                     ColorStop{.t = 0.34f, .color = {0.316f, 0.071f, 0.485f}},
@@ -148,7 +148,7 @@ auto sample_color(ColorPreset preset, f32 normalized_value) noexcept -> Color
             }
         case ColorPreset::turbo:
             {
-                static constexpr auto stops = std::array{
+                static constexpr std::array stops{
                     ColorStop{.t = 0.00f, .color = {0.190f, 0.072f, 0.232f}},
                     ColorStop{.t = 0.14f, .color = {0.145f, 0.365f, 0.901f}},
                     ColorStop{.t = 0.28f, .color = {0.023f, 0.627f, 0.886f}},

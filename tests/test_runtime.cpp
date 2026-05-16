@@ -34,7 +34,7 @@ static_assert(!std::is_polymorphic_v<PlainApp>);
 static_assert(sizeof(ds_vk::MeshDebugMode) == sizeof(ds_vk::u8));
 static_assert(sizeof(ds_vk::LightType) == sizeof(ds_vk::u8));
 
-auto check(const bool condition, const std::string_view message) -> void
+auto check(bool condition, const std::string_view message) -> void
 {
     if (!condition)
     {
@@ -45,7 +45,7 @@ auto check(const bool condition, const std::string_view message) -> void
 
 auto test_draw_list() -> void
 {
-    auto draw = ds_vk::DrawList{};
+    ds_vk::DrawList draw{};
     draw.draw_mesh({.mesh = ds_vk::MeshHandle{}});
     check(draw.mesh_commands().empty(), "invalid mesh handles are ignored");
 
@@ -208,6 +208,14 @@ auto test_draw_list() -> void
         .color = ds_vk::Color::white,
     });
     check(draw.debug_segments().size() == 2u, "debug line and arrow are recorded");
+    draw.debug_arrow({
+        .origin = {0.0f, 0.0f, 0.0f},
+        .vector = ds_vk::k_axis_z,
+        .color = ds_vk::Color::white,
+        .draw_on_top = true,
+    });
+    check(draw.debug_segments().size() == 2u, "on-top debug arrows skip depth-tested list");
+    check(draw.debug_on_top_segments().size() == 1u, "on-top debug arrows are recorded separately");
 
     draw.debug_sphere({
         .center = {0.0f, 0.0f, 0.0f},
@@ -228,6 +236,7 @@ auto test_draw_list() -> void
     draw.clear();
     check(draw.mesh_commands().empty(), "clear removes mesh commands");
     check(draw.debug_segments().empty(), "clear removes debug segments");
+    check(draw.debug_on_top_segments().empty(), "clear removes on-top debug segments");
     check(draw.lights().empty(), "clear removes lights");
     check(draw.ambient_light().r() == 0.035f, "clear resets ambient light");
     check(!draw.environment().texture.valid(), "clear resets environment texture");

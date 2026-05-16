@@ -18,11 +18,13 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
 #include <iostream>
+#include <limits>
 #include <numbers>
 #include <stb_image.h>
 #include <stb_image_write.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,11 +32,12 @@ namespace ds_vk
 {
 namespace
 {
-constexpr auto k_swapchain_image_usage =
-    VkImageUsageFlags{VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
-constexpr auto k_max_material_textures = u32{15};
-constexpr auto k_max_lights = u32{16};
-constexpr auto k_default_texture_index = 0u;
+constexpr VkImageUsageFlags k_swapchain_image_usage{
+    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+};
+constexpr usize k_max_material_textures{15zu};
+constexpr usize k_max_lights{16zu};
+constexpr u32 k_default_texture_index{0u};
 
 struct Buffer
 {
@@ -131,6 +134,21 @@ struct MeshPushConstants
     Mat4 model{1.0f};
 };
 
+struct GpuMeshInstance
+{
+    Mat4 model{1.0f};
+    Mat4 normal_model{1.0f};
+    u32 material_index{};
+    std::array<u32, 3> _pad{};
+};
+
+struct MeshBatch
+{
+    u32 mesh_id{};
+    u32 first_instance{};
+    u32 instance_count{};
+};
+
 struct DebugPushConstants
 {
     Mat4 view_projection{1.0f};
@@ -146,21 +164,24 @@ struct EnvironmentPushConstants
 };
 
 // clang-format off
-static_assert(sizeof(MeshPushConstants)              == 128zu);
-static_assert(sizeof(GpuMaterial)                    == 160zu);
-static_assert(offsetof(GpuMaterial, emissive_color)  == 16zu);
-static_assert(offsetof(GpuMaterial, pbr_params)      == 32zu);
-static_assert(offsetof(GpuMaterial, texture_params)  == 48zu);
-static_assert(offsetof(GpuMaterial, render_params)   == 64zu);
-static_assert(offsetof(GpuMaterial, debug_color)     == 80zu);
-static_assert(offsetof(GpuMaterial, debug_params)    == 96zu);
-static_assert(offsetof(GpuMaterial, debug_params2)   == 112zu);
-static_assert(offsetof(GpuMaterial, camera_position) == 128zu);
-static_assert(offsetof(GpuMaterial, camera_forward)  == 144zu);
-static_assert(sizeof(GpuLight)                       == 64zu);
-static_assert(sizeof(GpuLighting)                    == 112zu + static_cast<usize>(k_max_lights) * sizeof(GpuLight));
-static_assert(sizeof(DebugPushConstants)             == 96zu);
-static_assert(sizeof(EnvironmentPushConstants)       == 96zu);
+static_assert(sizeof(MeshPushConstants)                    == 128zu);
+static_assert(sizeof(GpuMeshInstance)                      == 144zu);
+static_assert(offsetof(GpuMeshInstance, normal_model)      == 64zu);
+static_assert(offsetof(GpuMeshInstance, material_index)    == 128zu);
+static_assert(sizeof(GpuMaterial)                          == 160zu);
+static_assert(offsetof(GpuMaterial, emissive_color)        == 16zu);
+static_assert(offsetof(GpuMaterial, pbr_params)            == 32zu);
+static_assert(offsetof(GpuMaterial, texture_params)        == 48zu);
+static_assert(offsetof(GpuMaterial, render_params)         == 64zu);
+static_assert(offsetof(GpuMaterial, debug_color)           == 80zu);
+static_assert(offsetof(GpuMaterial, debug_params)          == 96zu);
+static_assert(offsetof(GpuMaterial, debug_params2)         == 112zu);
+static_assert(offsetof(GpuMaterial, camera_position)       == 128zu);
+static_assert(offsetof(GpuMaterial, camera_forward)        == 144zu);
+static_assert(sizeof(GpuLight)                             == 64zu);
+static_assert(sizeof(GpuLighting)                          == 112zu + k_max_lights * sizeof(GpuLight));
+static_assert(sizeof(DebugPushConstants)                   == 96zu);
+static_assert(sizeof(EnvironmentPushConstants)             == 96zu);
 // clang-format on
 constexpr auto k_required_push_constant_bytes = std::max(
     {sizeof(MeshPushConstants), sizeof(DebugPushConstants), sizeof(EnvironmentPushConstants)}
@@ -169,11 +190,31 @@ constexpr auto k_required_push_constant_bytes = std::max(
 [[nodiscard]] auto material_base_color_texture_index(const Material& material) noexcept -> u32
 {
     if (material.textures.base_color.valid()
-        and material.textures.base_color.id < k_max_material_textures)
+        and static_cast<usize>(material.textures.base_color.id) < k_max_material_textures)
     {
         return material.textures.base_color.id;
     }
     return k_default_texture_index;
+}
+
+[[nodiscard]] auto checked_u32(usize value, std::string_view context) -> u32
+{
+    if (value > static_cast<usize>(std::numeric_limits<u32>::max()))
+    {
+        throw std::runtime_error(std::format("{} does not fit into u32: {}", context, value));
+    }
+    return static_cast<u32>(value);
+}
+
+[[nodiscard]] auto to_gpu_mesh_instance(const Transform& transform, u32 material_index) noexcept
+    -> GpuMeshInstance
+{
+    const auto model = transform.matrix();
+    return GpuMeshInstance{
+        .model = model,
+        .normal_model = glm::transpose(glm::inverse(model)),
+        .material_index = material_index,
+    };
 }
 
 auto to_gpu_material(
@@ -296,16 +337,16 @@ auto to_gpu_material(
     return false;
 }
 
-[[nodiscard]] auto shadow_light_index(std::span<const LightConfig> lights) noexcept -> u32
+[[nodiscard]] auto shadow_light_index(std::span<const LightConfig> lights) noexcept -> usize
 {
-    for (auto i = 0u; i < std::min(static_cast<u32>(lights.size()), k_max_lights); ++i)
+    for (auto i = 0zu; i < std::min(lights.size(), k_max_lights); ++i)
     {
         if (shadow_supported_by_light(lights[i]))
         {
             return i;
         }
     }
-    return std::numeric_limits<u32>::max();
+    return std::numeric_limits<usize>::max();
 }
 
 [[nodiscard]] auto light_view_matrix(Vec3 position, Vec3 direction) noexcept -> Mat4
@@ -380,17 +421,17 @@ light_view_projection_matrix(const LightConfig& light, const Camera& camera) noe
     Color ambient_light,
     const EnvironmentConfig& environment,
     const Camera& camera,
-    u32 shadow_index,
+    usize shadow_index,
     u32 shadow_resolution
 ) noexcept -> GpuLighting
 {
-    auto lighting = GpuLighting{
+    GpuLighting lighting{
         .ambient_light_count =
             Vec4{
                 ambient_light.r(),
                 ambient_light.g(),
                 ambient_light.b(),
-                static_cast<f32>(std::min(static_cast<u32>(lights.size()), k_max_lights)),
+                static_cast<f32>(std::min(lights.size(), k_max_lights)),
             },
         .environment_params = Vec4{
             environment.texture.valid() ? environment.lighting_intensity : 0.0f,
@@ -398,7 +439,8 @@ light_view_projection_matrix(const LightConfig& light, const Camera& camera) noe
                 ? environment.background_intensity
                 : 0.0f,
             environment.rotation_radians,
-            environment.texture.valid() and environment.texture.id < k_max_material_textures
+            environment.texture.valid()
+                    and static_cast<usize>(environment.texture.id) < k_max_material_textures
                 ? static_cast<f32>(environment.texture.id)
                 : -1.0f,
         },
@@ -414,7 +456,7 @@ light_view_projection_matrix(const LightConfig& light, const Camera& camera) noe
             static_cast<f32>(std::max(1u, shadow_resolution)),
         };
     }
-    for (auto i = 0u; i < std::min(static_cast<u32>(lights.size()), k_max_lights); ++i)
+    for (auto i = 0zu; i < std::min(lights.size(), k_max_lights); ++i)
     {
         lighting.lights[i] = to_gpu_light(lights[i], i == shadow_index);
     }
@@ -447,7 +489,7 @@ auto layer_available(const char* name) -> bool
 {
     auto count = 0u;
     (void) vkEnumerateInstanceLayerProperties(&count, nullptr);
-    auto layers = std::vector<VkLayerProperties>(count);
+    std::vector<VkLayerProperties> layers(count);
     (void) vkEnumerateInstanceLayerProperties(&count, layers.data());
     return std::ranges::any_of(
         layers,
@@ -468,7 +510,7 @@ auto extension_available(const std::vector<VkExtensionProperties>& properties, c
 
 auto read_shader_words(const std::filesystem::path& path) -> std::vector<u32>
 {
-    auto input = std::ifstream{path, std::ios::binary | std::ios::ate};
+    std::ifstream input{path, std::ios::binary | std::ios::ate};
     if (!input)
     {
         throw std::runtime_error(std::format("failed to open shader: {}", path.string()));
@@ -478,7 +520,7 @@ auto read_shader_words(const std::filesystem::path& path) -> std::vector<u32>
     {
         throw std::runtime_error(std::format("shader has invalid SPIR-V size: {}", path.string()));
     }
-    auto words = std::vector<u32>(static_cast<usize>(end) / sizeof(u32));
+    std::vector<u32> words(static_cast<usize>(end) / sizeof(u32));
     input.seekg(0, std::ios::beg);
     input.read(
         reinterpret_cast<char*>(words.data()),
@@ -499,14 +541,14 @@ auto create_shader_module(VkDevice device, const std::filesystem::path& path) ->
     info.codeSize = words.size() * sizeof(u32);
     info.pCode = words.data();
 
-    auto module = VkShaderModule{VK_NULL_HANDLE};
+    VkShaderModule module{VK_NULL_HANDLE};
     check_vk_result(vkCreateShaderModule(device, &info, nullptr, &module));
     return module;
 }
 
 auto find_depth_format(VkPhysicalDevice physical_device) -> VkFormat
 {
-    const auto candidates = std::array{
+    const std::array candidates{
         VK_FORMAT_D32_SFLOAT,
         VK_FORMAT_D24_UNORM_S8_UINT,
         VK_FORMAT_D16_UNORM,
@@ -530,6 +572,7 @@ auto DrawList::clear() -> void
 {
     mesh_commands_.clear();
     debug_segments_.clear();
+    debug_on_top_segments_.clear();
     lights_.clear();
     ambient_light_ = Color{0.035f, 0.040f, 0.050f, 1.0f};
     environment_ = {};
@@ -575,7 +618,8 @@ auto DrawList::draw_basic_mesh(const BasicMeshDrawConfig& config) -> void
 
 auto DrawList::debug_line(const DebugLineConfig& config) -> void
 {
-    debug_segments_.push_back(
+    auto& segments = config.draw_on_top ? debug_on_top_segments_ : debug_segments_;
+    segments.push_back(
         DebugSegment{
             .start = config.start,
             .width = config.width,
@@ -588,7 +632,8 @@ auto DrawList::debug_line(const DebugLineConfig& config) -> void
 
 auto DrawList::debug_arrow(const DebugArrowConfig& config) -> void
 {
-    debug_segments_.push_back(
+    auto& segments = config.draw_on_top ? debug_on_top_segments_ : debug_segments_;
+    segments.push_back(
         DebugSegment{
             .start = config.origin,
             .width = config.width,
@@ -624,6 +669,7 @@ auto DrawList::debug_sphere(const DebugSphereConfig& config) -> void
                 .end = config.center + Vec3{c1, s1, 0.0f},
                 .color = config.color,
                 .width = config.width,
+                .draw_on_top = config.draw_on_top,
             }
         );
         debug_line(
@@ -632,6 +678,7 @@ auto DrawList::debug_sphere(const DebugSphereConfig& config) -> void
                 .end = config.center + Vec3{c1, 0.0f, s1},
                 .color = config.color,
                 .width = config.width,
+                .draw_on_top = config.draw_on_top,
             }
         );
         debug_line(
@@ -640,6 +687,7 @@ auto DrawList::debug_sphere(const DebugSphereConfig& config) -> void
                 .end = config.center + Vec3{0.0f, c1, s1},
                 .color = config.color,
                 .width = config.width,
+                .draw_on_top = config.draw_on_top,
             }
         );
     }
@@ -715,6 +763,14 @@ auto DrawList::debug_segments() const noexcept -> std::span<const DebugSegment>
     return std::span<const DebugSegment>{debug_segments_.data(), debug_segments_.size()};
 }
 
+auto DrawList::debug_on_top_segments() const noexcept -> std::span<const DebugSegment>
+{
+    return std::span<const DebugSegment>{
+        debug_on_top_segments_.data(),
+        debug_on_top_segments_.size(),
+    };
+}
+
 auto DrawList::lights() const noexcept -> std::span<const LightConfig>
 {
     return std::span<const LightConfig>{lights_.data(), lights_.size()};
@@ -767,13 +823,19 @@ struct Runtime::Impl
     VkPipeline shadow_pipeline{VK_NULL_HANDLE};
     VkPipelineLayout debug_pipeline_layout{VK_NULL_HANDLE};
     VkPipeline debug_pipeline{VK_NULL_HANDLE};
+    VkPipeline debug_on_top_pipeline{VK_NULL_HANDLE};
     ShadowMap shadow_map{};
     std::vector<MeshResource> meshes;
     std::vector<TextureResource> textures;
     std::vector<Buffer> debug_segment_buffers;
+    std::vector<Buffer> debug_on_top_segment_buffers;
     std::vector<Buffer> mesh_material_buffers;
+    std::vector<Buffer> mesh_instance_buffers;
     std::vector<Buffer> mesh_lighting_buffers;
     std::vector<GpuMaterial> mesh_material_upload;
+    std::vector<GpuMeshInstance> mesh_instance_upload;
+    std::vector<usize> mesh_visible_indices;
+    std::vector<MeshBatch> mesh_batches;
     GpuLighting mesh_lighting_upload{};
     DrawList draw_list{};
     InputState input{};
@@ -815,24 +877,36 @@ struct Runtime::Impl
     auto
     load_hdr_texture(const std::filesystem::path& path, const HdrTextureLoadConfig& load_config)
         -> TextureHandle;
-    auto ensure_debug_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&;
-    auto ensure_mesh_material_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&;
-    auto ensure_mesh_lighting_buffer(u32 frame_index) -> Buffer&;
-    auto update_mesh_material_descriptor(u32 frame_index, const Buffer& buffer) -> void;
-    auto update_mesh_lighting_descriptor(u32 frame_index, const Buffer& buffer) -> void;
+    auto ensure_debug_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
+    auto ensure_debug_on_top_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
+    auto ensure_mesh_material_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
+    auto ensure_mesh_instance_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
+    auto ensure_mesh_lighting_buffer(usize frame_index) -> Buffer&;
+    auto flush_buffer(const Buffer& buffer, VkDeviceSize size) -> void;
+    auto update_mesh_material_descriptor(usize frame_index, const Buffer& buffer) -> void;
+    auto update_mesh_instance_descriptor(usize frame_index, const Buffer& buffer) -> void;
+    auto update_mesh_lighting_descriptor(usize frame_index, const Buffer& buffer) -> void;
     auto update_mesh_texture_descriptors() -> void;
     auto update_mesh_shadow_descriptors() -> void;
     auto create_mesh_resource(const MeshData& mesh) -> MeshResource;
     auto upload_mesh(const MeshData& mesh) -> MeshHandle;
     auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
     auto render_frame(
-        VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index, ImDrawData* draw_data
+        VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index, ImDrawData* draw_data
     ) -> void;
     auto draw_shadow_map(VkCommandBuffer command_buffer) -> void;
-    auto draw_environment(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
+    auto draw_environment(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index)
         -> void;
-    auto draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index) -> void;
-    auto draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index) -> void;
+    auto draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index) -> void;
+    auto draw_debug_segments(
+        VkCommandBuffer command_buffer,
+        VkExtent2D extent,
+        usize frame_index,
+        std::span<const DebugSegment> segments,
+        VkPipeline pipeline,
+        bool draw_on_top
+    ) -> void;
+    auto draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index) -> void;
     auto draw_runtime_ui() -> void;
     auto handle_event(const SDL_Event& event, bool& done, bool& orbiting, bool& panning) -> void;
     [[nodiscard]] auto framebuffer_mouse_position(f32 window_x, f32 window_y) const -> Vec2;
@@ -876,7 +950,7 @@ auto Runtime::Impl::create_buffer(
     }
 
     VmaAllocationInfo allocation_result{};
-    auto buffer = Buffer{.capacity = buffer_info.size};
+    Buffer buffer{.capacity = buffer_info.size};
     check_vk_result(vmaCreateBuffer(
         vma_allocator,
         &buffer_info,
@@ -911,7 +985,7 @@ auto Runtime::Impl::begin_immediate_commands() -> VkCommandBuffer
     allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocate_info.commandBufferCount = 1;
 
-    auto command_buffer = VkCommandBuffer{VK_NULL_HANDLE};
+    VkCommandBuffer command_buffer{VK_NULL_HANDLE};
     check_vk_result(vkAllocateCommandBuffers(device, &allocate_info, &command_buffer));
 
     VkCommandBufferBeginInfo begin_info{};
@@ -952,10 +1026,11 @@ auto Runtime::Impl::create_texture_resource(
     auto staging = create_buffer(
         pixel_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, VMA_MEMORY_USAGE_AUTO_PREFER_HOST
     );
-    auto texture = TextureResource{.width = width, .height = height, .format = format};
+    TextureResource texture{.width = width, .height = height, .format = format};
     try
     {
         std::memcpy(staging.mapped, pixels, static_cast<usize>(pixel_bytes));
+        flush_buffer(staging, pixel_bytes);
 
         VkImageCreateInfo image_info{};
         image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1089,7 +1164,7 @@ auto Runtime::Impl::create_default_texture() -> void
     {
         return;
     }
-    constexpr auto white = std::array<u8, 4>{255u, 255u, 255u, 255u};
+    constexpr std::array<u8, 4> white{255u, 255u, 255u, 255u};
     textures.push_back(create_texture_resource(white.data(), 1u, 1u, VK_FORMAT_R8G8B8A8_UNORM, 4u));
 }
 
@@ -1121,9 +1196,9 @@ auto Runtime::Impl::load_texture(
         );
     }
 
-    auto width = int{};
-    auto height = int{};
-    auto channels = int{};
+    int width{};
+    int height{};
+    int channels{};
     auto* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, STBI_rgb_alpha);
     if (!pixels)
     {
@@ -1132,7 +1207,7 @@ auto Runtime::Impl::load_texture(
         );
     }
 
-    auto texture = TextureResource{};
+    TextureResource texture{};
     try
     {
         const auto format = load_config.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
@@ -1172,9 +1247,9 @@ auto Runtime::Impl::load_hdr_texture(
         );
     }
 
-    auto width = int{};
-    auto height = int{};
-    auto channels = int{};
+    int width{};
+    int height{};
+    int channels{};
     auto* pixels = stbi_loadf(path.string().c_str(), &width, &height, &channels, STBI_rgb_alpha);
     if (!pixels)
     {
@@ -1193,7 +1268,7 @@ auto Runtime::Impl::load_hdr_texture(
         pixels[i] *= load_config.exposure;
     }
 
-    auto texture = TextureResource{};
+    TextureResource texture{};
     try
     {
         texture = create_texture_resource(
@@ -1225,11 +1300,12 @@ auto Runtime::Impl::load_hdr_texture(
     return TextureHandle{.id = index};
 }
 
-auto Runtime::Impl::ensure_debug_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&
+auto Runtime::Impl::ensure_debug_buffer(usize frame_index, VkDeviceSize size) -> Buffer&
 {
-    if (debug_segment_buffers.size() < window_data.ImageCount)
+    const auto image_count = static_cast<usize>(window_data.ImageCount);
+    if (debug_segment_buffers.size() < image_count)
     {
-        debug_segment_buffers.resize(window_data.ImageCount);
+        debug_segment_buffers.resize(image_count);
     }
     auto& buffer = debug_segment_buffers.at(frame_index);
     if (buffer.capacity >= size and buffer.handle != VK_NULL_HANDLE)
@@ -1245,11 +1321,33 @@ auto Runtime::Impl::ensure_debug_buffer(u32 frame_index, VkDeviceSize size) -> B
     return buffer;
 }
 
-auto Runtime::Impl::ensure_mesh_material_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&
+auto Runtime::Impl::ensure_debug_on_top_buffer(usize frame_index, VkDeviceSize size) -> Buffer&
 {
-    if (mesh_material_buffers.size() < window_data.ImageCount)
+    const auto image_count = static_cast<usize>(window_data.ImageCount);
+    if (debug_on_top_segment_buffers.size() < image_count)
     {
-        mesh_material_buffers.resize(window_data.ImageCount);
+        debug_on_top_segment_buffers.resize(image_count);
+    }
+    auto& buffer = debug_on_top_segment_buffers.at(frame_index);
+    if (buffer.capacity >= size and buffer.handle != VK_NULL_HANDLE)
+    {
+        return buffer;
+    }
+
+    check_vk_result(vkDeviceWaitIdle(device));
+    destroy_buffer(buffer);
+    buffer = create_buffer(
+        size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, VMA_MEMORY_USAGE_AUTO_PREFER_HOST
+    );
+    return buffer;
+}
+
+auto Runtime::Impl::ensure_mesh_material_buffer(usize frame_index, VkDeviceSize size) -> Buffer&
+{
+    const auto image_count = static_cast<usize>(window_data.ImageCount);
+    if (mesh_material_buffers.size() < image_count)
+    {
+        mesh_material_buffers.resize(image_count);
     }
     auto& buffer = mesh_material_buffers.at(frame_index);
     if (buffer.capacity >= size and buffer.handle != VK_NULL_HANDLE)
@@ -1266,11 +1364,34 @@ auto Runtime::Impl::ensure_mesh_material_buffer(u32 frame_index, VkDeviceSize si
     return buffer;
 }
 
-auto Runtime::Impl::ensure_mesh_lighting_buffer(u32 frame_index) -> Buffer&
+auto Runtime::Impl::ensure_mesh_instance_buffer(usize frame_index, VkDeviceSize size) -> Buffer&
 {
-    if (mesh_lighting_buffers.size() < window_data.ImageCount)
+    const auto image_count = static_cast<usize>(window_data.ImageCount);
+    if (mesh_instance_buffers.size() < image_count)
     {
-        mesh_lighting_buffers.resize(window_data.ImageCount);
+        mesh_instance_buffers.resize(image_count);
+    }
+    auto& buffer = mesh_instance_buffers.at(frame_index);
+    if (buffer.capacity >= size and buffer.handle != VK_NULL_HANDLE)
+    {
+        return buffer;
+    }
+
+    check_vk_result(vkDeviceWaitIdle(device));
+    destroy_buffer(buffer);
+    buffer = create_buffer(
+        size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, VMA_MEMORY_USAGE_AUTO_PREFER_HOST
+    );
+    update_mesh_instance_descriptor(frame_index, buffer);
+    return buffer;
+}
+
+auto Runtime::Impl::ensure_mesh_lighting_buffer(usize frame_index) -> Buffer&
+{
+    const auto image_count = static_cast<usize>(window_data.ImageCount);
+    if (mesh_lighting_buffers.size() < image_count)
+    {
+        mesh_lighting_buffers.resize(image_count);
     }
     auto& buffer = mesh_lighting_buffers.at(frame_index);
     if (buffer.capacity >= sizeof(GpuLighting) and buffer.handle != VK_NULL_HANDLE)
@@ -1290,14 +1411,23 @@ auto Runtime::Impl::ensure_mesh_lighting_buffer(u32 frame_index) -> Buffer&
     return buffer;
 }
 
-auto Runtime::Impl::update_mesh_material_descriptor(u32 frame_index, const Buffer& buffer) -> void
+auto Runtime::Impl::flush_buffer(const Buffer& buffer, VkDeviceSize size) -> void
+{
+    if (buffer.allocation == nullptr or size == VkDeviceSize{0})
+    {
+        return;
+    }
+    check_vk_result(vmaFlushAllocation(vma_allocator, buffer.allocation, 0, size));
+}
+
+auto Runtime::Impl::update_mesh_material_descriptor(usize frame_index, const Buffer& buffer) -> void
 {
     if (mesh_descriptor_sets.empty())
     {
         throw std::runtime_error("mesh material descriptor sets are not initialized");
     }
 
-    const auto buffer_info = VkDescriptorBufferInfo{
+    const VkDescriptorBufferInfo buffer_info{
         .buffer = buffer.handle,
         .offset = 0,
         .range = buffer.capacity,
@@ -1312,14 +1442,36 @@ auto Runtime::Impl::update_mesh_material_descriptor(u32 frame_index, const Buffe
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-auto Runtime::Impl::update_mesh_lighting_descriptor(u32 frame_index, const Buffer& buffer) -> void
+auto Runtime::Impl::update_mesh_instance_descriptor(usize frame_index, const Buffer& buffer) -> void
+{
+    if (mesh_descriptor_sets.empty())
+    {
+        throw std::runtime_error("mesh instance descriptor sets are not initialized");
+    }
+
+    const VkDescriptorBufferInfo buffer_info{
+        .buffer = buffer.handle,
+        .offset = 0,
+        .range = buffer.capacity,
+    };
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = mesh_descriptor_sets.at(frame_index);
+    write.dstBinding = 4;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &buffer_info;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+auto Runtime::Impl::update_mesh_lighting_descriptor(usize frame_index, const Buffer& buffer) -> void
 {
     if (mesh_descriptor_sets.empty())
     {
         throw std::runtime_error("mesh lighting descriptor sets are not initialized");
     }
 
-    const auto buffer_info = VkDescriptorBufferInfo{
+    const VkDescriptorBufferInfo buffer_info{
         .buffer = buffer.handle,
         .offset = 0,
         .range = buffer.capacity,
@@ -1345,15 +1497,15 @@ auto Runtime::Impl::update_mesh_texture_descriptors() -> void
         throw std::runtime_error("mesh texture descriptors require the default texture");
     }
 
-    auto image_infos = std::array<VkDescriptorImageInfo, k_max_material_textures>{};
+    std::array<VkDescriptorImageInfo, k_max_material_textures> image_infos{};
     const auto& default_texture = textures.at(k_default_texture_index);
-    const auto default_info = VkDescriptorImageInfo{
+    const VkDescriptorImageInfo default_info{
         .sampler = default_texture.sampler,
         .imageView = default_texture.view,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
     image_infos.fill(default_info);
-    for (auto i = 0u; i < std::min(static_cast<u32>(textures.size()), k_max_material_textures); ++i)
+    for (auto i = 0zu; i < std::min(textures.size(), k_max_material_textures); ++i)
     {
         image_infos[i] = VkDescriptorImageInfo{
             .sampler = textures[i].sampler,
@@ -1369,7 +1521,7 @@ auto Runtime::Impl::update_mesh_texture_descriptors() -> void
         write.dstSet = descriptor_set;
         write.dstBinding = 1;
         write.dstArrayElement = 0;
-        write.descriptorCount = k_max_material_textures;
+        write.descriptorCount = static_cast<u32>(k_max_material_textures);
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.pImageInfo = image_infos.data();
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
@@ -1383,7 +1535,7 @@ auto Runtime::Impl::update_mesh_shadow_descriptors() -> void
         return;
     }
 
-    const auto image_info = VkDescriptorImageInfo{
+    const VkDescriptorImageInfo image_info{
         .sampler = shadow_map.sampler,
         .imageView = shadow_map.view,
         .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
@@ -1414,7 +1566,7 @@ auto Runtime::Impl::create_mesh_resource(const MeshData& mesh) -> MeshResource
 
     const auto vertex_bytes = data_byte_size(mesh.vertices);
     const auto index_bytes = data_byte_size(mesh.indices);
-    auto resource = MeshResource{};
+    MeshResource resource{};
     try
     {
         resource.vertex_count = static_cast<u32>(mesh.vertices.size());
@@ -1456,7 +1608,8 @@ auto Runtime::Impl::upload_mesh(const MeshData& mesh) -> MeshHandle
 
 auto Runtime::Impl::replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle
 {
-    if (!handle.valid() or handle.id >= meshes.size())
+    const auto mesh_index = static_cast<usize>(handle.id);
+    if (!handle.valid() or mesh_index >= meshes.size())
     {
         return upload_mesh(mesh);
     }
@@ -1472,8 +1625,8 @@ auto Runtime::Impl::replace_mesh(MeshHandle handle, const MeshData& mesh) -> Mes
         destroy_buffer(replacement.indices);
         throw;
     }
-    auto old = meshes[handle.id];
-    meshes[handle.id] = replacement;
+    auto old = meshes[mesh_index];
+    meshes[mesh_index] = replacement;
     destroy_buffer(old.vertices);
     destroy_buffer(old.indices);
     return handle;
@@ -1636,7 +1789,7 @@ auto Runtime::Impl::destroy_shadow_map() noexcept -> void
 
 auto Runtime::Impl::create_depth_attachment(u32 width, u32 height) -> DepthAttachment
 {
-    auto depth = DepthAttachment{};
+    DepthAttachment depth{};
     VkImageCreateInfo image_info{};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -1731,7 +1884,7 @@ auto Runtime::Impl::install_depth_rendering() -> void
     depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    const auto attachments = std::array{color_attachment, depth_attachment};
+    const std::array attachments{color_attachment, depth_attachment};
     VkAttachmentReference color_reference{};
     color_reference.attachment = 0;
     color_reference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1815,7 +1968,7 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
     check_vk_result(
         vkEnumerateInstanceExtensionProperties(nullptr, &instance_extension_count, nullptr)
     );
-    auto instance_properties = std::vector<VkExtensionProperties>(instance_extension_count);
+    std::vector<VkExtensionProperties> instance_properties(instance_extension_count);
     check_vk_result(vkEnumerateInstanceExtensionProperties(
         nullptr, &instance_extension_count, instance_properties.data()
     ));
@@ -1873,8 +2026,8 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
     {
         throw std::runtime_error("physical device maxPushConstantsSize is too small for ds_vk");
     }
-    if (physical_device_properties.limits.maxPerStageDescriptorSamplers
-        < k_max_material_textures + 1u)
+    if (static_cast<usize>(physical_device_properties.limits.maxPerStageDescriptorSamplers)
+        < k_max_material_textures + 1zu)
     {
         throw std::runtime_error(
             "physical device maxPerStageDescriptorSamplers is too small for ds_vk"
@@ -1885,12 +2038,12 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
     check_vk_result(vkEnumerateDeviceExtensionProperties(
         physical_device, nullptr, &device_extension_count, nullptr
     ));
-    auto device_properties = std::vector<VkExtensionProperties>(device_extension_count);
+    std::vector<VkExtensionProperties> device_properties(device_extension_count);
     check_vk_result(vkEnumerateDeviceExtensionProperties(
         physical_device, nullptr, &device_extension_count, device_properties.data()
     ));
 
-    auto device_extensions = std::vector<const char*>{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    std::vector<const char*> device_extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 #ifdef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
     if (extension_available(device_properties, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME))
     {
@@ -1993,7 +2146,7 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
     allocator_info.vulkanApiVersion = vulkan_api_version;
     check_vk_result(vmaCreateAllocator(&allocator_info, &vma_allocator));
 
-    const auto pool_sizes = std::array{
+    const std::array pool_sizes{
         VkDescriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
             .descriptorCount = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE,
@@ -2034,7 +2187,7 @@ auto Runtime::Impl::setup_vulkan_window(
         throw std::runtime_error("selected Vulkan queue has no WSI support");
     }
 
-    const auto formats = std::array{
+    const std::array formats{
         VK_FORMAT_B8G8R8A8_UNORM,
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_FORMAT_B8G8R8_UNORM,
@@ -2048,7 +2201,7 @@ auto Runtime::Impl::setup_vulkan_window(
         static_cast<int>(formats.size()),
         VK_COLORSPACE_SRGB_NONLINEAR_KHR
     );
-    auto present_modes = std::array{VK_PRESENT_MODE_FIFO_KHR};
+    std::array present_modes{VK_PRESENT_MODE_FIFO_KHR};
     window_data.PresentMode = ImGui_ImplVulkanH_SelectPresentMode(
         physical_device,
         window_data.Surface,
@@ -2148,7 +2301,7 @@ auto Runtime::Impl::create_pipelines() -> void
     VkDescriptorSetLayoutBinding texture_binding{};
     texture_binding.binding = 1;
     texture_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    texture_binding.descriptorCount = k_max_material_textures;
+    texture_binding.descriptorCount = static_cast<u32>(k_max_material_textures);
     texture_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutBinding lighting_binding{};
@@ -2163,11 +2316,18 @@ auto Runtime::Impl::create_pipelines() -> void
     shadow_binding.descriptorCount = 1;
     shadow_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    const auto mesh_descriptor_bindings = std::array{
+    VkDescriptorSetLayoutBinding instance_binding{};
+    instance_binding.binding = 4;
+    instance_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    instance_binding.descriptorCount = 1;
+    instance_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    const std::array mesh_descriptor_bindings{
         material_binding,
         texture_binding,
         lighting_binding,
         shadow_binding,
+        instance_binding,
     };
     VkDescriptorSetLayoutCreateInfo mesh_descriptor_layout_info{};
     mesh_descriptor_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2177,15 +2337,15 @@ auto Runtime::Impl::create_pipelines() -> void
         device, &mesh_descriptor_layout_info, allocation_callbacks, &mesh_descriptor_set_layout
     ));
 
-    const auto descriptor_pool_sizes = std::array{
+    const std::array descriptor_pool_sizes{
         VkDescriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = std::max(1u, window_data.ImageCount) * 2u,
+            .descriptorCount = std::max(1u, window_data.ImageCount) * 3u,
         },
         VkDescriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount =
-                std::max(1u, window_data.ImageCount) * (k_max_material_textures + 1u),
+            .descriptorCount = std::max(1u, window_data.ImageCount)
+                               * static_cast<u32>(k_max_material_textures + 1zu),
         },
     };
     VkDescriptorPoolCreateInfo mesh_descriptor_pool_info{};
@@ -2197,9 +2357,10 @@ auto Runtime::Impl::create_pipelines() -> void
         device, &mesh_descriptor_pool_info, allocation_callbacks, &mesh_descriptor_pool
     ));
 
-    mesh_descriptor_sets.resize(window_data.ImageCount);
+    const auto image_count = static_cast<usize>(window_data.ImageCount);
+    mesh_descriptor_sets.resize(image_count);
     const auto descriptor_layouts =
-        std::vector<VkDescriptorSetLayout>(window_data.ImageCount, mesh_descriptor_set_layout);
+        std::vector<VkDescriptorSetLayout>(image_count, mesh_descriptor_set_layout);
     VkDescriptorSetAllocateInfo descriptor_allocate_info{};
     descriptor_allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     descriptor_allocate_info.descriptorPool = mesh_descriptor_pool;
@@ -2208,13 +2369,19 @@ auto Runtime::Impl::create_pipelines() -> void
     check_vk_result(
         vkAllocateDescriptorSets(device, &descriptor_allocate_info, mesh_descriptor_sets.data())
     );
-    for (auto i = 0u;
-         i < std::min(static_cast<u32>(mesh_material_buffers.size()), window_data.ImageCount);
-         ++i)
+    const auto buffered_buffer_count = std::max(
+        {mesh_material_buffers.size(), mesh_instance_buffers.size(), mesh_lighting_buffers.size()}
+    );
+    const auto buffered_frame_count = std::min(buffered_buffer_count, image_count);
+    for (auto i = 0zu; i < buffered_frame_count; ++i)
     {
         if (mesh_material_buffers[i].handle != VK_NULL_HANDLE)
         {
             update_mesh_material_descriptor(i, mesh_material_buffers[i]);
+        }
+        if (i < mesh_instance_buffers.size() and mesh_instance_buffers[i].handle != VK_NULL_HANDLE)
+        {
+            update_mesh_instance_descriptor(i, mesh_instance_buffers[i]);
         }
         if (i < mesh_lighting_buffers.size() and mesh_lighting_buffers[i].handle != VK_NULL_HANDLE)
         {
@@ -2299,18 +2466,18 @@ auto Runtime::Impl::create_pipelines() -> void
     blend_state.attachmentCount = 1;
     blend_state.pAttachments = &color_attachment;
 
-    const auto dynamic_states = std::array{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    const std::array dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic_state{};
     dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynamic_state.dynamicStateCount = static_cast<u32>(dynamic_states.size());
     dynamic_state.pDynamicStates = dynamic_states.data();
 
-    const auto mesh_binding = VkVertexInputBindingDescription{
+    const VkVertexInputBindingDescription mesh_binding{
         .binding = 0,
         .stride = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
     };
-    const auto mesh_attributes = std::array{
+    const std::array mesh_attributes{
         VkVertexInputAttributeDescription{
             .location = 0,
             .binding = 0,
@@ -2343,7 +2510,7 @@ auto Runtime::Impl::create_pipelines() -> void
     mesh_vertex_input.vertexAttributeDescriptionCount = static_cast<u32>(mesh_attributes.size());
     mesh_vertex_input.pVertexAttributeDescriptions = mesh_attributes.data();
 
-    const auto mesh_stages = std::array{
+    const std::array mesh_stages{
         make_stage(mesh_vert, VK_SHADER_STAGE_VERTEX_BIT),
         make_stage(mesh_frag, VK_SHADER_STAGE_FRAGMENT_BIT),
     };
@@ -2373,7 +2540,7 @@ auto Runtime::Impl::create_pipelines() -> void
     environment_depth_state.depthTestEnable = VK_TRUE;
     environment_depth_state.depthWriteEnable = VK_FALSE;
     environment_depth_state.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    const auto environment_stages = std::array{
+    const std::array environment_stages{
         make_stage(environment_vert, VK_SHADER_STAGE_VERTEX_BIT),
         make_stage(environment_frag, VK_SHADER_STAGE_FRAGMENT_BIT),
     };
@@ -2391,7 +2558,7 @@ auto Runtime::Impl::create_pipelines() -> void
         &environment_pipeline
     ));
 
-    const auto shadow_attributes = std::array{
+    const std::array shadow_attributes{
         VkVertexInputAttributeDescription{
             .location = 0,
             .binding = 0,
@@ -2415,7 +2582,7 @@ auto Runtime::Impl::create_pipelines() -> void
     shadow_depth_state.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     VkPipelineColorBlendStateCreateInfo shadow_blend_state{};
     shadow_blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    const auto shadow_stages = std::array{make_stage(shadow_vert, VK_SHADER_STAGE_VERTEX_BIT)};
+    const std::array shadow_stages{make_stage(shadow_vert, VK_SHADER_STAGE_VERTEX_BIT)};
     VkGraphicsPipelineCreateInfo shadow_pipeline_info = mesh_pipeline_info;
     shadow_pipeline_info.stageCount = static_cast<u32>(shadow_stages.size());
     shadow_pipeline_info.pStages = shadow_stages.data();
@@ -2429,12 +2596,12 @@ auto Runtime::Impl::create_pipelines() -> void
         device, pipeline_cache, 1, &shadow_pipeline_info, allocation_callbacks, &shadow_pipeline
     ));
 
-    const auto debug_binding = VkVertexInputBindingDescription{
+    const VkVertexInputBindingDescription debug_binding{
         .binding = 0,
         .stride = sizeof(DebugSegment),
         .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE,
     };
-    const auto debug_attributes = std::array{
+    const std::array debug_attributes{
         VkVertexInputAttributeDescription{
             .location = 0,
             .binding = 0,
@@ -2486,7 +2653,7 @@ auto Runtime::Impl::create_pipelines() -> void
     auto debug_blend_state = blend_state;
     debug_blend_state.pAttachments = &debug_color_attachment;
 
-    const auto debug_stages = std::array{
+    const std::array debug_stages{
         make_stage(debug_vert, VK_SHADER_STAGE_VERTEX_BIT),
         make_stage(debug_frag, VK_SHADER_STAGE_FRAGMENT_BIT),
     };
@@ -2501,11 +2668,28 @@ auto Runtime::Impl::create_pipelines() -> void
         device, pipeline_cache, 1, &debug_pipeline_info, allocation_callbacks, &debug_pipeline
     ));
 
+    auto debug_on_top_depth_state = debug_depth_state;
+    debug_on_top_depth_state.depthTestEnable = VK_FALSE;
+    debug_pipeline_info.pDepthStencilState = &debug_on_top_depth_state;
+    check_vk_result(vkCreateGraphicsPipelines(
+        device,
+        pipeline_cache,
+        1,
+        &debug_pipeline_info,
+        allocation_callbacks,
+        &debug_on_top_pipeline
+    ));
+
     destroy_shader_modules();
 }
 
 auto Runtime::Impl::destroy_pipelines() noexcept -> void
 {
+    if (debug_on_top_pipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, debug_on_top_pipeline, allocation_callbacks);
+        debug_on_top_pipeline = VK_NULL_HANDLE;
+    }
     if (debug_pipeline != VK_NULL_HANDLE)
     {
         vkDestroyPipeline(device, debug_pipeline, allocation_callbacks);
@@ -2580,7 +2764,7 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
     render_pass_begin.pClearValues = &clear;
     vkCmdBeginRenderPass(command_buffer, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
 
-    const auto viewport = VkViewport{
+    const VkViewport viewport{
         .x = 0.0f,
         .y = 0.0f,
         .width = static_cast<f32>(shadow_map.resolution),
@@ -2588,7 +2772,7 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
         .minDepth = 0.0f,
         .maxDepth = 1.0f,
     };
-    const auto scissor = VkRect2D{
+    const VkRect2D scissor{
         .offset = VkOffset2D{.x = 0, .y = 0},
         .extent = VkExtent2D{.width = shadow_map.resolution, .height = shadow_map.resolution},
     };
@@ -2598,17 +2782,17 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
 
     for (const auto& command : mesh_commands)
     {
-        if (!command.mask.shadow_producer or !command.mesh.valid()
-            or command.mesh.id >= meshes.size())
+        const auto mesh_index = static_cast<usize>(command.mesh.id);
+        if (!command.mask.shadow_producer or !command.mesh.valid() or mesh_index >= meshes.size())
         {
             continue;
         }
-        const auto& mesh = meshes[command.mesh.id];
-        const auto offsets = std::array<VkDeviceSize, 1>{0};
-        const auto vertex_buffers = std::array{mesh.vertices.handle};
+        const auto& mesh = meshes[mesh_index];
+        const std::array<VkDeviceSize, 1> offsets{0};
+        const std::array vertex_buffers{mesh.vertices.handle};
         vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers.data(), offsets.data());
         vkCmdBindIndexBuffer(command_buffer, mesh.indices.handle, 0, VK_INDEX_TYPE_UINT32);
-        const auto push = MeshPushConstants{
+        const MeshPushConstants push{
             .view_projection = shadow_view_projection,
             .model = command.transform.matrix(),
         };
@@ -2651,19 +2835,19 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
 }
 
 auto Runtime::Impl::draw_environment(
-    VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index
+    VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index
 ) -> void
 {
     const auto& environment = draw_list.environment();
     if (!environment.texture.valid() or !environment.visible_to_camera
-        or environment.texture.id >= k_max_material_textures
+        or static_cast<usize>(environment.texture.id) >= k_max_material_textures
         or environment.background_intensity <= 0.0f or environment_pipeline == VK_NULL_HANDLE)
     {
         return;
     }
     const auto aspect = static_cast<f32>(std::max(1u, extent.width))
                         / static_cast<f32>(std::max(1u, extent.height));
-    const auto push = EnvironmentPushConstants{
+    const EnvironmentPushConstants push{
         .inverse_view_projection = glm::inverse(camera.view_projection_matrix(aspect)),
         .camera_position = Vec4{camera.position(), 1.0f},
         .params = Vec4{
@@ -2690,9 +2874,11 @@ auto Runtime::Impl::draw_environment(
     vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
 }
 
-auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
-    -> void
+auto Runtime::Impl::draw_meshes(
+    VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index
+) -> void
 {
+    mesh_batches.clear();
     if (draw_list.mesh_commands().empty() or mesh_pipeline == VK_NULL_HANDLE)
     {
         return;
@@ -2713,11 +2899,43 @@ auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D exten
     );
     auto& lighting_buffer = ensure_mesh_lighting_buffer(frame_index);
     std::memcpy(lighting_buffer.mapped, &mesh_lighting_upload, sizeof(mesh_lighting_upload));
+    flush_buffer(lighting_buffer, sizeof(mesh_lighting_upload));
+
+    mesh_visible_indices.clear();
+    mesh_visible_indices.reserve(mesh_commands.size());
+    for (auto command_index = 0zu; command_index < mesh_commands.size(); ++command_index)
+    {
+        const auto& command = mesh_commands[command_index];
+        const auto mesh_index = static_cast<usize>(command.mesh.id);
+        if (!command.mask.visible_to_camera or !command.mesh.valid() or mesh_index >= meshes.size())
+        {
+            continue;
+        }
+        mesh_visible_indices.push_back(command_index);
+    }
+    if (mesh_visible_indices.empty())
+    {
+        return;
+    }
+
+    std::ranges::sort(
+        mesh_visible_indices,
+        [&](usize lhs, usize rhs) noexcept -> bool
+        { return mesh_commands[lhs].mesh.id < mesh_commands[rhs].mesh.id; }
+    );
 
     mesh_material_upload.clear();
-    mesh_material_upload.reserve(mesh_commands.size());
-    for (const auto& command : mesh_commands)
+    mesh_material_upload.reserve(mesh_visible_indices.size());
+    mesh_instance_upload.clear();
+    mesh_instance_upload.reserve(mesh_visible_indices.size());
+    mesh_batches.reserve(mesh_visible_indices.size());
+
+    for (const auto command_index : mesh_visible_indices)
     {
+        const auto& command = mesh_commands[command_index];
+        const auto mesh_id = command.mesh.id;
+        const auto instance_index = checked_u32(mesh_instance_upload.size(), "mesh instance index");
+        const auto material_index = checked_u32(mesh_material_upload.size(), "mesh material index");
         mesh_material_upload.push_back(to_gpu_material(
             command.material,
             command.mask,
@@ -2727,12 +2945,37 @@ auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D exten
             camera_position,
             camera_forward
         ));
+        mesh_instance_upload.push_back(to_gpu_mesh_instance(command.transform, material_index));
+
+        if (mesh_batches.empty() or mesh_batches.back().mesh_id != mesh_id)
+        {
+            mesh_batches.push_back(
+                MeshBatch{
+                    .mesh_id = mesh_id,
+                    .first_instance = instance_index,
+                    .instance_count = 1u,
+                }
+            );
+        }
+        else
+        {
+            ++mesh_batches.back().instance_count;
+        }
     }
+
     const auto material_byte_count = data_byte_size(mesh_material_upload);
     auto& material_buffer = ensure_mesh_material_buffer(frame_index, material_byte_count);
     std::memcpy(
         material_buffer.mapped, mesh_material_upload.data(), static_cast<usize>(material_byte_count)
     );
+    flush_buffer(material_buffer, material_byte_count);
+
+    const auto instance_byte_count = data_byte_size(mesh_instance_upload);
+    auto& instance_buffer = ensure_mesh_instance_buffer(frame_index, instance_byte_count);
+    std::memcpy(
+        instance_buffer.mapped, mesh_instance_upload.data(), static_cast<usize>(instance_byte_count)
+    );
+    flush_buffer(instance_buffer, instance_byte_count);
 
     const auto aspect = static_cast<f32>(std::max(1u, extent.width))
                         / static_cast<f32>(std::max(1u, extent.height));
@@ -2748,69 +2991,88 @@ auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D exten
         0,
         nullptr
     );
-    for (auto command_index = 0zu; command_index < mesh_commands.size(); ++command_index)
+    const MeshPushConstants push{
+        .view_projection = view_projection,
+        .model = Mat4{1.0f},
+    };
+    vkCmdPushConstants(
+        command_buffer, mesh_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push
+    );
+
+    for (const auto& batch : mesh_batches)
     {
-        const auto& command = mesh_commands[command_index];
-        if (!command.mask.visible_to_camera or !command.mesh.valid()
-            or command.mesh.id >= meshes.size())
-        {
-            continue;
-        }
-        const auto& mesh = meshes[command.mesh.id];
-        const auto offsets = std::array<VkDeviceSize, 1>{0};
-        const auto vertex_buffers = std::array{mesh.vertices.handle};
+        const auto mesh_index = static_cast<usize>(batch.mesh_id);
+        const auto& mesh = meshes[mesh_index];
+        const std::array<VkDeviceSize, 1> offsets{0};
+        const std::array vertex_buffers{mesh.vertices.handle};
         vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers.data(), offsets.data());
         vkCmdBindIndexBuffer(command_buffer, mesh.indices.handle, 0, VK_INDEX_TYPE_UINT32);
 
-        const auto model = command.transform.matrix();
-        const auto push = MeshPushConstants{
-            .view_projection = view_projection,
-            .model = model,
-        };
-        vkCmdPushConstants(
-            command_buffer, mesh_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push
-        );
         vkCmdDrawIndexed(
-            command_buffer, mesh.index_count, 1, 0, 0, static_cast<u32>(command_index)
+            command_buffer, mesh.index_count, batch.instance_count, 0, 0, batch.first_instance
         );
     }
 }
 
-auto Runtime::Impl::draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
-    -> void
+auto Runtime::Impl::draw_debug_segments(
+    VkCommandBuffer command_buffer,
+    VkExtent2D extent,
+    usize frame_index,
+    std::span<const DebugSegment> segments,
+    VkPipeline pipeline,
+    bool draw_on_top
+) -> void
 {
-    if (draw_list.debug_segments().empty() or debug_pipeline == VK_NULL_HANDLE)
+    if (segments.empty() or pipeline == VK_NULL_HANDLE)
     {
         return;
     }
 
-    const auto byte_count = data_byte_size(draw_list.debug_segments());
-    auto& buffer = ensure_debug_buffer(frame_index, byte_count);
-    std::memcpy(buffer.mapped, draw_list.debug_segments().data(), static_cast<usize>(byte_count));
+    const auto byte_count = data_byte_size(segments);
+    auto& buffer = draw_on_top ? ensure_debug_on_top_buffer(frame_index, byte_count)
+                               : ensure_debug_buffer(frame_index, byte_count);
+    std::memcpy(buffer.mapped, segments.data(), static_cast<usize>(byte_count));
+    flush_buffer(buffer, byte_count);
 
     const auto aspect = static_cast<f32>(std::max(1u, extent.width))
                         / static_cast<f32>(std::max(1u, extent.height));
-    const auto push = DebugPushConstants{
+    const DebugPushConstants push{
         .view_projection = camera.view_projection_matrix(aspect),
         .camera_position = Vec4{camera.position(), 1.0f},
         .camera_right = Vec4{camera.right(), 0.0f},
     };
 
-    const auto vertex_buffers = std::array{buffer.handle};
-    const auto offsets = std::array<VkDeviceSize, 1>{0};
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, debug_pipeline);
+    const std::array vertex_buffers{buffer.handle};
+    const std::array<VkDeviceSize, 1> offsets{0};
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers.data(), offsets.data());
     vkCmdPushConstants(
         command_buffer, debug_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push
     );
-    vkCmdDraw(command_buffer, 18u, static_cast<u32>(draw_list.debug_segments().size()), 0, 0);
+    vkCmdDraw(command_buffer, 18u, static_cast<u32>(segments.size()), 0, 0);
+}
+
+auto Runtime::Impl::draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index)
+    -> void
+{
+    draw_debug_segments(
+        command_buffer, extent, frame_index, draw_list.debug_segments(), debug_pipeline, false
+    );
+    draw_debug_segments(
+        command_buffer,
+        extent,
+        frame_index,
+        draw_list.debug_on_top_segments(),
+        debug_on_top_pipeline,
+        true
+    );
 }
 
 auto Runtime::Impl::render_frame(
-    VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index, ImDrawData* draw_data
+    VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index, ImDrawData* draw_data
 ) -> void
 {
-    const auto viewport = VkViewport{
+    const VkViewport viewport{
         .x = 0.0f,
         .y = 0.0f,
         .width = static_cast<f32>(extent.width),
@@ -2818,7 +3080,7 @@ auto Runtime::Impl::render_frame(
         .minDepth = 0.0f,
         .maxDepth = 1.0f,
     };
-    const auto scissor = VkRect2D{.offset = VkOffset2D{.x = 0, .y = 0}, .extent = extent};
+    const VkRect2D scissor{.offset = VkOffset2D{.x = 0, .y = 0}, .extent = extent};
     vkCmdSetViewport(command_buffer, 0, 1, &viewport);
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
@@ -2861,7 +3123,7 @@ auto Runtime::Impl::draw_runtime_ui() -> void
         camera.zoom_sensitivity() = std::clamp(camera.zoom_sensitivity(), 0.10f, 4.0f);
     }
 
-    const auto projection_labels = std::array{"Perspective", "Orthographic"};
+    const std::array projection_labels{"Perspective", "Orthographic"};
     auto projection_index = camera.projection_mode() == ProjectionMode::orthographic ? 1 : 0;
     if (ImGui::Combo("Projection", &projection_index, projection_labels.data(), 2))
     {
@@ -2871,9 +3133,10 @@ auto Runtime::Impl::draw_runtime_ui() -> void
 
     ImGui::DragFloat3("Pivot", &camera.pivot().x, 0.01f);
     ImGui::Text(
-        "Frame %.2f ms | draw %u | debug %u | lights %u",
-        static_cast<double>(stats.last_frame_ms),
+        "Frame %.2f ms | draw %u/%u | debug %u | lights %u",
+        static_cast<f64>(stats.last_frame_ms),
         stats.mesh_draws,
+        stats.mesh_batches,
         stats.debug_segments,
         stats.lights
     );
@@ -2904,10 +3167,41 @@ auto Runtime::Impl::handle_event(const SDL_Event& event, bool& done, bool& orbit
     {
         done = true;
     }
-    if (event.type == SDL_EVENT_KEY_DOWN and event.key.key == SDLK_SPACE and !event.key.repeat
-        and !io.WantCaptureKeyboard)
+    if (event.type == SDL_EVENT_KEY_DOWN and !event.key.repeat and !io.WantCaptureKeyboard)
     {
-        input.space_pressed = true;
+        switch (event.key.key)
+        {
+            case SDLK_SPACE:
+                input.space_pressed = true;
+                break;
+            case SDLK_G:
+                input.key_g_pressed = true;
+                break;
+            case SDLK_R:
+                input.key_r_pressed = true;
+                break;
+            case SDLK_S:
+                input.key_s_pressed = true;
+                break;
+            case SDLK_X:
+                input.key_x_pressed = true;
+                break;
+            case SDLK_Y:
+                input.key_y_pressed = true;
+                break;
+            case SDLK_Z:
+                input.key_z_pressed = true;
+                break;
+            case SDLK_C:
+                input.key_c_pressed = true;
+                break;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+                input.key_enter_pressed = true;
+                break;
+            default:
+                break;
+        }
     }
     if (event.type == SDL_EVENT_WINDOW_RESIZED or event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
     {
@@ -3013,6 +3307,14 @@ auto Runtime::Impl::reset_input_frame() -> void
     (void) SDL_GetMouseState(&mouse_x, &mouse_y);
     input.left_click = {};
     input.space_pressed = false;
+    input.key_g_pressed = false;
+    input.key_r_pressed = false;
+    input.key_s_pressed = false;
+    input.key_x_pressed = false;
+    input.key_y_pressed = false;
+    input.key_z_pressed = false;
+    input.key_c_pressed = false;
+    input.key_enter_pressed = false;
     input.mouse_px = framebuffer_mouse_position(mouse_x, mouse_y);
     input.mouse_captured_by_ui = ImGui::GetIO().WantCaptureMouse;
 }
@@ -3154,7 +3456,7 @@ auto Runtime::Impl::write_capture_png(const SwapchainCapture& capture) -> void
     }
     const auto bgra =
         capture.format == VK_FORMAT_B8G8R8A8_UNORM or capture.format == VK_FORMAT_B8G8R8A8_SRGB;
-    auto rgba = std::vector<u8>(
+    std::vector<u8> rgba(
         static_cast<usize>(capture.width) * static_cast<usize>(capture.height) * 4zu
     );
 
@@ -3166,11 +3468,13 @@ auto Runtime::Impl::write_capture_png(const SwapchainCapture& capture) -> void
             vmaInvalidateAllocation(vma_allocator, capture.allocation, 0, capture.size)
         );
         const auto* pixels = static_cast<const u8*>(mapped);
-        for (auto y = 0u; y < capture.height; ++y)
+        const auto capture_width = static_cast<usize>(capture.width);
+        const auto capture_height = static_cast<usize>(capture.height);
+        for (auto y = 0zu; y < capture_height; ++y)
         {
-            for (auto x = 0u; x < capture.width; ++x)
+            for (auto x = 0zu; x < capture_width; ++x)
             {
-                const auto i = (static_cast<usize>(y) * capture.width + x) * 4zu;
+                const auto i = (y * capture_width + x) * 4zu;
                 rgba[i + 0zu] = bgra ? pixels[i + 2zu] : pixels[i + 0zu];
                 rgba[i + 1zu] = pixels[i + 1zu];
                 rgba[i + 2zu] = bgra ? pixels[i + 0zu] : pixels[i + 2zu];
@@ -3237,7 +3541,7 @@ auto Runtime::Impl::initialize() -> void
     {
         throw std::runtime_error("SDL_Vulkan_GetInstanceExtensions failed");
     }
-    auto instance_extensions = std::vector<const char*>{};
+    std::vector<const char*> instance_extensions{};
     instance_extensions.reserve(sdl_extension_count + 4zu);
     for (auto i = 0u; i < sdl_extension_count; ++i)
     {
@@ -3245,7 +3549,7 @@ auto Runtime::Impl::initialize() -> void
     }
     setup_vulkan(std::move(instance_extensions));
 
-    auto surface = VkSurfaceKHR{VK_NULL_HANDLE};
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
     if (!SDL_Vulkan_CreateSurface(window, instance, allocation_callbacks, &surface))
     {
         throw std::runtime_error("SDL_Vulkan_CreateSurface failed");
@@ -3275,12 +3579,27 @@ auto Runtime::Impl::shutdown() noexcept -> void
     }
     debug_segment_buffers.clear();
 
+    for (auto& buffer : debug_on_top_segment_buffers)
+    {
+        destroy_buffer(buffer);
+    }
+    debug_on_top_segment_buffers.clear();
+
     for (auto& buffer : mesh_material_buffers)
     {
         destroy_buffer(buffer);
     }
     mesh_material_buffers.clear();
     mesh_material_upload.clear();
+
+    for (auto& buffer : mesh_instance_buffers)
+    {
+        destroy_buffer(buffer);
+    }
+    mesh_instance_buffers.clear();
+    mesh_instance_upload.clear();
+    mesh_visible_indices.clear();
+    mesh_batches.clear();
 
     for (auto& buffer : mesh_lighting_buffers)
     {
@@ -3434,11 +3753,11 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
         check_vk_result(vkBeginCommandBuffer(frame->CommandBuffer, &begin_info));
 
         draw_list.clear();
-        const auto extent = VkExtent2D{
+        const VkExtent2D extent{
             .width = static_cast<u32>(std::max(0, window_data.Width)),
             .height = static_cast<u32>(std::max(0, window_data.Height)),
         };
-        auto frame_context = FrameContext{
+        FrameContext frame_context{
             .instance = instance,
             .physical_device = physical_device,
             .device = device,
@@ -3468,7 +3787,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
         ImGui::Render();
         const auto ui_end = std::chrono::steady_clock::now();
 
-        auto capture = SwapchainCapture{};
+        SwapchainCapture capture{};
         if (!pending_screenshot.empty() and frame_counter >= 4u)
         {
             capture.width = extent.width;
@@ -3486,7 +3805,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
         render_pass_info.renderPass = window_data.RenderPass;
         render_pass_info.framebuffer = frame->Framebuffer;
         render_pass_info.renderArea.extent = extent;
-        auto clear_values = std::array{
+        std::array clear_values{
             window_data.ClearValue,
             VkClearValue{.depthStencil = {.depth = 1.0f, .stencil = 0}},
         };
@@ -3498,7 +3817,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
         render_frame(
             frame->CommandBuffer,
             extent,
-            window_data.FrameIndex,
+            static_cast<usize>(window_data.FrameIndex),
             config.hide_ui ? nullptr : ImGui::GetDrawData()
         );
         vkCmdEndRenderPass(frame->CommandBuffer);
@@ -3507,7 +3826,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
             record_capture_commands(frame->CommandBuffer, frame, capture);
         }
 
-        const auto wait_stage = VkPipelineStageFlags{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        const VkPipelineStageFlags wait_stage{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
         VkSubmitInfo submit_info{};
         submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit_info.waitSemaphoreCount = 1;
@@ -3543,7 +3862,10 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
             .last_render_ms =
                 std::chrono::duration<f32, std::milli>(render_end - render_begin).count(),
             .mesh_draws = static_cast<u32>(draw_list.mesh_commands().size()),
-            .debug_segments = static_cast<u32>(draw_list.debug_segments().size()),
+            .mesh_batches = static_cast<u32>(mesh_batches.size()),
+            .debug_segments = static_cast<u32>(
+                draw_list.debug_segments().size() + draw_list.debug_on_top_segments().size()
+            ),
             .lights = static_cast<u32>(draw_list.lights().size()),
         };
 

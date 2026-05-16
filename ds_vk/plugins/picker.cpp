@@ -169,7 +169,7 @@ auto Picker::add_screen_segment(const PickerScreenSegmentConfig& config) -> Pick
 
 auto Picker::raycast(const PickerRaycastConfig& config) const -> std::optional<PickerHit>
 {
-    auto best = std::optional<PickerHit>{};
+    std::optional<PickerHit> best{};
     for (const auto& target : targets_)
     {
         const auto target_pickable = target.common.enabled and target.common.object_id.valid()
@@ -180,7 +180,7 @@ auto Picker::raycast(const PickerRaycastConfig& config) const -> std::optional<P
             continue;
         }
 
-        auto hit = std::optional<RayHit>{};
+        std::optional<RayHit> hit{};
         switch (target.shape)
         {
             case PickerShapeType::sphere:

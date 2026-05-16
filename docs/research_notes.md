@@ -294,17 +294,136 @@ Implementation decisions:
 
 Useful follow-up pressure points:
 
-- DFSPH particle rendering as one draw per particle is good enough for the MVP,
-  but the real reusable unlock is an instanced sphere/point path once particle
-  count becomes a bottleneck.
-- PBA collision is app-owned for now. A future manipulator plugin should depend
-  on picker and own only transient interaction state, with user callbacks for
-  transform get/set.
+- DFSPH particle rendering now reaches Vulkan as batched mesh instances, but the
+  app still builds generic per-particle draw/material commands on the CPU. If
+  the larger scenes become CPU-bound, the real reusable unlock is a compact
+  particle/viz upload path that bypasses that generic command construction.
+- PBA collision is app-owned for now. The manipulator plugin owns only
+  transient interaction state, with app callbacks for transform get/set.
 - Capture/video export from the old projects is still a good candidate for a
   `ds_vk::capture` module once screenshot validation stabilizes.
 - Reduce the fixed material texture table from 16 to 15 slots because the shadow
   map sampler shares the same fragment shader stage and MoltenVK commonly
   exposes a 16-sampler per-stage floor on Apple hardware.
+
+## PBA Comparison Pass
+
+Checked local source:
+`/Users/danielsinkin/GitHub_private/physically-based-animations`.
+
+Important discrepancies from the proper PBA implementation:
+
+- The proper PBA has SOA rigid-body storage, force and torque accumulators,
+  angular velocity, inertia tensors, sleeping, grabbed-body flags, sweep-and-
+  prune broadphase, OBB contact generation, warm starting, position/velocity
+  constraint solvers, and a contact cache.
+- The `ds_vk` PBA user remains deliberately smaller: app-owned `Body` data,
+  linear velocity only, no torque/angular solver, no sleeping, no contact cache,
+  and an AABB-style penetration resolver.
+- This pass integrated the reusable parts that fit the MVP without turning
+  `ds_vk` into a physics engine:
+  - `Body::force_accum`;
+  - `GravityForce`, `AttractorForce`, `RepulsionForce`, and `NBodyForce`;
+  - grabbed-body skipping for force integration and collision resolution;
+  - a sweep-and-prune broadphase over world AABBs;
+  - per-step broadphase stats for checking candidate count against all-pairs;
+  - `ds_vk::Manipulator`, a static plugin with callback-owned transforms.
+- Performance judgment: for the current 56-body pyramid this app should be
+  roughly comparable or faster per step than the proper PBA because the solver
+  is much simpler. It is not equivalent for larger scenes. The proper PBA's SOA
+  layout, parallel force/inertia passes, cached contacts, OBB contacts, and
+  solver structure remain the better design for the old repo's large scenes.
+  The new sweep-and-prune pass removes the worst all-pairs behavior for sparse
+  scenes, but the MVP is still not a replacement for the full PBA solver.
+
+## DFSPH Renderer / Vulkan Performance Pass
+
+Start time for this pass: 2026-05-16.
+
+Old DFSPH agent research checked:
+
+- `/Users/danielsinkin/GitHub_private/SPH-Seminar/dfsph_viewer/docs/research_notes.md`
+- `/Users/danielsinkin/GitHub_private/SPH-Seminar/dfsph_viewer/docs/future_work.md`
+- `src/dfsph_viewer/core/culling.{hpp,cpp}`
+- `src/dfsph_viewer/gfx/vulkan_particle_renderer.cpp`
+
+Useful old-implementation findings:
+
+- The old DFSPH particle path rendered particles as one sphere mesh plus a
+  per-particle instance buffer. That is the important scalability property: 50k
+  particles should not mean 50k Vulkan draw calls.
+- The old renderer used persistently mapped VMA buffers and explicitly called
+  `vmaFlushAllocation` after host writes. This matters for non-coherent
+  host-visible memory and is still correct when the flush becomes a no-op on a
+  coherent memory type.
+- Conservative frustum culling and optional front-to-back/screen-space
+  occlusion were app-level decisions with debug counters. The measured old
+  screen-space occlusion path could reduce GPU sphere work in overdraw-heavy
+  views, but it cost a CPU proof pass and was slower in forced cache-miss
+  playback cases. That should remain an opt-in DFSPH-specific/debug feature
+  rather than a core-runtime default.
+- The old renderer split dynamic cache keys by camera, frame, debug settings,
+  surface mesh, visualization lines, and rigid-body mesh data. That is a useful
+  future shape for app-level large-data caches, but it would be premature in the
+  generic `DrawList` right now.
+
+External references checked:
+
+- Khronos command-buffer sample:
+  https://github.khronos.org/Vulkan-Site/samples/latest/samples/performance/command_buffer_usage/README.html
+  - Recycle command buffers through command-pool reset rather than
+    allocate/free on hot paths. Secondary command buffers are only worth it when
+    there is enough recorded work per buffer.
+- Vulkan Guide memory allocation:
+  https://docs.vulkan.org/guide/latest/memory_allocation.html
+  - Suballocation is the normal Vulkan shape. UMA devices can expose memory that
+    is both device-local and host-visible, which is relevant for Apple
+    Silicon/MoltenVK dynamic uploads.
+- VMA memory mapping and usage-pattern docs:
+  https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/memory_mapping.html
+  and
+  https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/usage_patterns.html
+  - Persistently mapped buffers are acceptable. Host writes to non-coherent
+    mapped memory need an explicit flush; VMA handles atom-size alignment in
+    `vmaFlushAllocation`.
+- NVIDIA Vulkan Do's and Don'ts:
+  https://developer.nvidia.com/blog/?p=14696
+  - Minimize pipeline binds and group draw calls by shader/pipeline/material
+    family where practical. Keep barriers precise and do not assume the driver
+    will hide command-recording cost on worker threads.
+- Khronos pipeline-barrier sample:
+  https://docs.vulkan.org/samples/latest/samples/performance/pipeline_barriers/README.html
+  - Broad barriers can force unnecessary pipeline flushes. Correctness comes
+    first, but performance-sensitive barriers should name the actual producer
+    and consumer stages.
+
+Implemented here:
+
+- Generic mesh rendering now collapses visible `DrawList` mesh commands into
+  instanced batches grouped by `MeshHandle`. The app still uses an
+  immediate-mode-ish `draw_mesh` / `draw_basic_mesh` call per object, but the
+  Vulkan side binds each mesh once per contiguous batch and uses
+  `vkCmdDrawIndexed(..., instance_count, ..., first_instance)`.
+- Per-instance model matrix, normal matrix, and material index moved to a
+  storage buffer consumed by `mesh.vert`. This is enough for the DFSPH particle
+  use case: many sphere instances with per-particle color/material differences.
+- Runtime stats now report both submitted mesh draw commands and emitted mesh
+  batches so CPU-side draw-call pressure is visible in the UI.
+- Mapped dynamic uploads now flush through a small `Runtime::Impl::flush_buffer`
+  helper after writes to texture staging, material, instance, lighting, and
+  debug segment buffers.
+
+Not copied yet:
+
+- DFSPH-specific frustum/screen-occlusion culling. The framework now removes the
+  worst Vulkan submission issue, but the app still builds per-particle commands
+  and per-particle materials on the CPU. If the 130k dambreak scene is still too
+  heavy, the next targeted step is a DFSPH particle/viz upload path that builds
+  a compact sphere-instance buffer directly instead of going through generic
+  `MeshDrawCommand` objects.
+- Indirect draws and GPU-driven culling. They are interesting, but too much
+  machinery for the current scale and would make the framework less pleasant to
+  modify while the API is still young.
 
 ## Framework Shape Chosen For This Pass
 
@@ -341,9 +460,9 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
   still query descriptor indexing support now so the next pass can add a
   descriptor heap without changing the app-facing concept of material/resource
   handles.
-- This pass keeps mesh draws direct and simple. For the fifth-project goal,
-  repeated mesh draws should later bucket by `(pipeline, mesh)` and use an
-  instance buffer or indirect draw path.
+- Generic mesh draws are now batched by mesh through an instance buffer. The
+  next performance question is not Vulkan draw-call count, but whether very
+  large app data sets need app-specific compact upload paths and cache keys.
 - Shader hot reload is deferred. CMake-compiled GLSL is the fastest reliable
   first step; hot reload can reuse the pipeline rebuild boundaries once more
   material types exist.
@@ -874,3 +993,63 @@ future synchronization helpers should be thin wrappers over `vkCmdPipelineBarrie
   the view stays grayscale.
 - The app now labels the three light toggles explicitly as Directional, Radial,
   and Spot, and light gizmos follow the same per-light `enabled` flags.
+
+### 2026-05-16 DFSPH Renderer Performance Backport
+
+- Checked the old DFSPH agent research notes and renderer/culling source, then
+  backported the broadly useful parts: instanced mesh batching for repeated
+  mesh draws and explicit VMA flushes after mapped-buffer writes.
+- Verification:
+  - `cmake --build build`
+  - `ctest --test-dir build --output-on-failure`
+  - `clang-format --dry-run --Werror ds_vk/runtime.cpp ds_vk/runtime.hpp ds_vk/shaders/mesh.vert`
+  - `clang-tidy -p build ds_vk/runtime.cpp app/dfsph_main.cpp`
+  - `git diff --check`
+  - `./run.sh --app dfsph --scene-id dambreak_small_iisph_v1 --show-mesh --show-particles --hide-ui --smoke-frames 8 --screenshot run/dfsph_perf_batch_smoke.png`
+  - `./.venv/bin/python scripts/validate_screenshot.py run/dfsph_perf_batch_smoke.png`
+
+### 2026-05-16 DFSPH Surface Mesh CPU Preload
+
+- Profiling the 50k DFSPH surface mesh showed the playback hot path was CPU
+  limited by per-frame `.mesh.gz` read/decompress/decode work, not by particle
+  rendering. The surface cache is about 1.07 GiB compressed, about 2.89 GiB as
+  decompressed quantized payloads, and about 9.38 GiB as fully expanded
+  `MeshData` CPU vectors before allocator overhead. That is large, but
+  acceptable as an opt-in DFSPH mesh-viewer path on the development machine.
+- `ds_vk_dfsph_app` now preloads decoded CPU `MeshData` for every available
+  surface frame when the surface mesh view is enabled. This deliberately keeps
+  the renderer resource model unchanged: playback still uploads the active
+  frame through `Runtime::replace_mesh`, but file IO, gzip, and decode are paid
+  once up front.
+- The preload uses an explicit `std::jthread` manager plus worker `std::jthread`s
+  instead of nested `std::async`, so ownership, joining, and stop requests are
+  visible. The worker count is capped at 8 for now. The fullscreen ImGui loading
+  overlay dims and captures the UI, then shows elapsed time, worker count,
+  checked/decoded frame counts, and a determinate progress bar.
+- Crash note: the first threaded preload attempt put a 1 MiB gzip read buffer on
+  each worker stack and crashed on macOS with `SIGBUS` against the stack guard.
+  `read_gzip_file` now uses a heap `std::vector<u8>` chunk buffer instead.
+- Before CPU preload on
+  `dambreak_50k_600f_dfsph_v2 --show-mesh --hide-particles --hide-ui
+  --smoke-frames 120 --playback-speed 20 --profile`, active surface frames
+  averaged about 20.45 ms total: 17.77 ms read/decompress/decode and 2.68 ms
+  upload.
+- Single-threaded CPU preload initially took 12882.841 ms for all 600 frames.
+  The explicit 8-worker preload reduced that to 4223.951 ms on the same 50k
+  scene. Runtime surface read/gzip/decode counters were 0.000 ms after preload.
+- The remaining cost is now the upload/replacement path. `replace_mesh`
+  conservatively uses `vkDeviceWaitIdle` before destroying the previous mesh
+  buffers, so fast mesh playback can still stall on synchronization and buffer
+  upload. A bigger fix would use staged per-frame uploads plus deferred resource
+  destruction tied to frame fences, or a more specialized streaming surface
+  buffer path. That is outside the current small change, but it is now the clear
+  next bottleneck instead of gzip/decode.
+- Verification:
+  - `cmake --build build --target ds_vk_dfsph_app`
+  - `./run.sh --app dfsph --scene-id dambreak_50k_600f_dfsph_v2 --show-mesh --hide-particles --smoke-frames 12 --screenshot run/dfsph_surface_preload_overlay.png`
+  - `./.venv/bin/python scripts/validate_screenshot.py run/dfsph_surface_preload_overlay.png`
+  - `./run.sh --app dfsph --scene-id dambreak_50k_600f_dfsph_v2 --show-mesh --hide-particles --hide-ui --smoke-frames 1200 --playback-speed 20 --profile`
+  - `clang-format --dry-run --Werror app/dfsph_main.cpp`
+  - `clang-tidy -p build app/dfsph_main.cpp`
+  - `ctest --test-dir build --output-on-failure`
+  - `git diff --check`

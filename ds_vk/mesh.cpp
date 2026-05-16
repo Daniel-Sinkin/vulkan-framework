@@ -43,7 +43,7 @@ auto Transform::matrix() const noexcept -> Mat4
 auto make_quad(f32 side_length, Color color) -> MeshData
 {
     const auto half = 0.5f * std::max(0.0f, side_length);
-    auto mesh = MeshData{};
+    MeshData mesh{};
     mesh.vertices = {
         Vertex{
             .position = {-half, -half, 0.0f},
@@ -77,7 +77,7 @@ auto make_quad(f32 side_length, Color color) -> MeshData
 auto make_cube(f32 side_length, Color color) -> MeshData
 {
     const auto half = 0.5f * std::max(0.0f, side_length);
-    auto mesh = MeshData{};
+    MeshData mesh{};
     mesh.vertices.reserve(24zu);
     mesh.indices.reserve(36zu);
 
@@ -144,7 +144,7 @@ auto make_uv_sphere(const UvSphereConfig& config) -> MeshData
     const auto slices = std::max(3u, config.slices);
     const auto stacks = std::max(2u, config.stacks);
     const auto safe_radius = std::max(0.0f, config.radius);
-    auto mesh = MeshData{};
+    MeshData mesh{};
 
     const auto n_vertices = static_cast<usize>(slices + 1u) * static_cast<usize>(stacks + 1u);
     const auto n_indices = static_cast<usize>(slices) * static_cast<usize>(stacks) * 6zu;
@@ -202,8 +202,8 @@ auto aabb_of(const MeshData& mesh) -> Aabb
         return {};
     }
 
-    auto min_value = Vec3{std::numeric_limits<f32>::max()};
-    auto max_value = Vec3{std::numeric_limits<f32>::lowest()};
+    Vec3 min_value{std::numeric_limits<f32>::max()};
+    Vec3 max_value{std::numeric_limits<f32>::lowest()};
     for (const auto& vertex : mesh.vertices)
     {
         min_value = glm::min(min_value, vertex.position);

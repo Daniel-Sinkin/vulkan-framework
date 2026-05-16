@@ -24,13 +24,13 @@ constexpr auto k_component_u16 = 5123;
 constexpr auto k_component_u32 = 5125;
 constexpr auto k_component_f32 = 5126;
 constexpr auto k_mode_triangles = 4;
-constexpr auto k_glb_magic = u32{0x46546c67u};
-constexpr auto k_glb_version_2 = u32{2u};
+constexpr u32 k_glb_magic{0x46546c67u};
+constexpr u32 k_glb_version_2{2u};
 constexpr auto k_glb_header_bytes = 12zu;
 constexpr auto k_glb_chunk_header_bytes = 8zu;
 constexpr auto k_glb_min_bytes = k_glb_header_bytes + k_glb_chunk_header_bytes;
-constexpr auto k_glb_json_chunk_type = u32{0x4e4f534au};
-constexpr auto k_glb_binary_chunk_type = u32{0x004e4942u};
+constexpr u32 k_glb_json_chunk_type{0x4e4f534au};
+constexpr u32 k_glb_binary_chunk_type{0x004e4942u};
 constexpr auto k_glb_chunk_alignment = 4zu;
 
 struct GltfDocument
@@ -50,7 +50,7 @@ struct AccessorView
 
 [[nodiscard]] auto read_file_bytes(const std::filesystem::path& path) -> std::vector<u8>
 {
-    auto in = std::ifstream{path, std::ios::binary | std::ios::ate};
+    std::ifstream in{path, std::ios::binary | std::ios::ate};
     if (!in)
     {
         throw std::runtime_error(std::format("failed to open glTF file: {}", path.string()));
@@ -60,7 +60,7 @@ struct AccessorView
     {
         throw std::runtime_error(std::format("failed to size glTF file: {}", path.string()));
     }
-    auto bytes = std::vector<u8>(static_cast<usize>(size));
+    std::vector<u8> bytes(static_cast<usize>(size));
     in.seekg(0);
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!in)
@@ -141,8 +141,8 @@ template <typename T>
 
 [[nodiscard]] auto decode_base64(std::string_view text) -> std::vector<u8>
 {
-    constexpr auto invalid = int{-1};
-    auto table = std::array<int, 256>{};
+    constexpr int invalid{-1};
+    std::array<int, 256> table{};
     table.fill(invalid);
     constexpr auto alphabet =
         std::string_view{"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"};
@@ -151,7 +151,7 @@ template <typename T>
         table[static_cast<unsigned char>(alphabet[i])] = static_cast<int>(i);
     }
 
-    auto out = std::vector<u8>{};
+    std::vector<u8> out{};
     auto value = 0;
     auto bits = -8;
     for (const char c : text)
@@ -179,7 +179,7 @@ template <typename T>
 [[nodiscard]] auto read_buffer_uri(const std::filesystem::path& base_dir, std::string_view uri)
     -> std::vector<u8>
 {
-    constexpr auto data_prefix = std::string_view{"data:"};
+    constexpr std::string_view data_prefix{"data:"};
     if (uri.starts_with(data_prefix))
     {
         const auto comma = uri.find(',');
@@ -209,7 +209,7 @@ template <typename T>
         throw std::runtime_error(std::format("invalid GLB header: {}", path.string()));
     }
 
-    auto document = GltfDocument{};
+    GltfDocument document{};
     auto cursor = k_glb_header_bytes;
 
     const auto json_chunk_length = static_cast<usize>(read_unaligned<u32>(bytes.data() + cursor));
@@ -272,8 +272,8 @@ template <typename T>
         return parse_glb(path, bytes);
     }
 
-    auto document = GltfDocument{};
-    const auto json_text = std::string{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+    GltfDocument document{};
+    const std::string json_text{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
     document.json = nlohmann::json::parse(json_text);
 
     const auto buffers = document.json.find("buffers");
@@ -399,7 +399,7 @@ template <typename T>
 
 auto generate_smooth_normals(MeshData& mesh) -> void
 {
-    auto normals = std::vector<Vec3>(mesh.vertices.size(), Vec3{0.0f});
+    std::vector<Vec3> normals(mesh.vertices.size(), Vec3{0.0f});
     for (auto i = 0zu; i + 2zu < mesh.indices.size(); i += 3zu)
     {
         const auto ia = mesh.indices[i + 0zu];
@@ -448,7 +448,7 @@ auto load_gltf_mesh(const std::filesystem::path& path, const GltfMeshLoadConfig&
                              ? AccessorView{}
                              : accessor_view(document, primitive.at("indices").get<int>());
 
-    auto mesh_data = MeshData{};
+    MeshData mesh_data{};
     mesh_data.vertices.reserve(positions.count);
     const auto model = cfg.transform.matrix();
     const auto normal_matrix = glm::transpose(glm::inverse(Mat4{model}));

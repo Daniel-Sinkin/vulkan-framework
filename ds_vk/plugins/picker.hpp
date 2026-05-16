@@ -12,7 +12,7 @@ namespace ds_vk
 using Layer = u32;
 using LayerMask = u32;
 
-inline constexpr auto k_pick_layer_default = Layer{1u << 0u};
+inline constexpr Layer k_pick_layer_default{1u << 0u};
 inline constexpr auto k_pick_layer_all = std::numeric_limits<LayerMask>::max();
 
 struct PickTargetId

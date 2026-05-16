@@ -193,6 +193,7 @@ class DrawList
 
     [[nodiscard]] auto mesh_commands() const noexcept                  -> std::span<const MeshDrawCommand>;
     [[nodiscard]] auto debug_segments() const noexcept                 -> std::span<const DebugSegment>;
+    [[nodiscard]] auto debug_on_top_segments() const noexcept          -> std::span<const DebugSegment>;
     [[nodiscard]] auto lights() const noexcept                         -> std::span<const LightConfig>;
     [[nodiscard]] auto ambient_light() const noexcept                  -> Color;
     [[nodiscard]] auto environment() const noexcept                    -> const EnvironmentConfig&;
@@ -201,6 +202,7 @@ class DrawList
   private:
     std::vector<MeshDrawCommand> mesh_commands_{};
     std::vector<DebugSegment> debug_segments_{};
+    std::vector<DebugSegment> debug_on_top_segments_{};
     std::vector<LightConfig> lights_{};
     Color ambient_light_{0.035f, 0.040f, 0.050f, 1.0f};
     EnvironmentConfig environment_{};
@@ -213,6 +215,7 @@ struct RuntimeStats
     f32 last_ui_ms{};
     f32 last_render_ms{};
     u32 mesh_draws{};
+    u32 mesh_batches{};
     u32 debug_segments{};
     u32 lights{};
 };
@@ -263,6 +266,14 @@ struct InputState
     Vec2 mouse_px{};
     bool mouse_captured_by_ui{};
     bool space_pressed{};
+    bool key_g_pressed{};
+    bool key_r_pressed{};
+    bool key_s_pressed{};
+    bool key_x_pressed{};
+    bool key_y_pressed{};
+    bool key_z_pressed{};
+    bool key_c_pressed{};
+    bool key_enter_pressed{};
     MouseClick left_click{};
 };
 
@@ -350,7 +361,7 @@ class Runtime
             "update(FrameContext&, f32), draw_ui(FrameContext&), or shutdown(Runtime&)."
         );
 
-        const auto callbacks = detail::RuntimeCallbacks{
+        const detail::RuntimeCallbacks callbacks{
             .user = &app,
             .setup = [](void* user, Runtime& runtime) -> void
             {

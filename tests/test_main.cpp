@@ -2,6 +2,7 @@
 #include "ds_vk/camera.hpp"
 #include "ds_vk/geometry.hpp"
 #include "ds_vk/mesh.hpp"
+#include "ds_vk/plugins/manipulator.hpp"
 #include "ds_vk/plugins/picker.hpp"
 #include "ds_vk/plugins/viz.hpp"
 
@@ -10,9 +11,12 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <functional>
 #include <glm/gtc/constants.hpp>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -25,7 +29,7 @@ auto g_failures = 0;
 #    define DS_VK_TEST_ASSET_DIR "assets"
 #endif
 
-auto check(const bool condition, const std::string_view message) -> void
+auto check(bool condition, const std::string_view message) -> void
 {
     if (!condition)
     {
@@ -72,14 +76,14 @@ auto pad_to_glb_alignment(std::vector<ds_vk::u8>& bytes, ds_vk::u8 pad) -> void
 
 [[nodiscard]] auto make_triangle_glb_with_unknown_chunk() -> std::vector<ds_vk::u8>
 {
-    constexpr auto k_glb_magic = ds_vk::u32{0x46546c67u};
-    constexpr auto k_glb_version_2 = ds_vk::u32{2u};
-    constexpr auto k_glb_json_chunk_type = ds_vk::u32{0x4e4f534au};
-    constexpr auto k_glb_binary_chunk_type = ds_vk::u32{0x004e4942u};
-    constexpr auto k_unknown_chunk_type = ds_vk::u32{0x54534554u};
-    constexpr auto k_binary_byte_length = ds_vk::usize{102zu};
+    constexpr ds_vk::u32 k_glb_magic{0x46546c67u};
+    constexpr ds_vk::u32 k_glb_version_2{2u};
+    constexpr ds_vk::u32 k_glb_json_chunk_type{0x4e4f534au};
+    constexpr ds_vk::u32 k_glb_binary_chunk_type{0x004e4942u};
+    constexpr ds_vk::u32 k_unknown_chunk_type{0x54534554u};
+    constexpr ds_vk::usize k_binary_byte_length{102zu};
 
-    auto bin = std::vector<ds_vk::u8>{};
+    std::vector<ds_vk::u8> bin{};
     bin.reserve(k_binary_byte_length);
     const auto append_vec3 = [&](ds_vk::Vec3 value) -> void
     {
@@ -107,22 +111,22 @@ auto pad_to_glb_alignment(std::vector<ds_vk::u8>& bytes, ds_vk::u8 pad) -> void
     check(bin.size() == k_binary_byte_length, "glb fixture binary layout");
     pad_to_glb_alignment(bin, ds_vk::u8{0u});
 
-    auto json_chunk = std::vector<ds_vk::u8>{};
-    constexpr auto json_text = std::string_view{
+    std::vector<ds_vk::u8> json_chunk{};
+    constexpr std::string_view json_text{
         R"({"asset":{"version":"2.0"},"buffers":[{"byteLength":102}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":36},{"buffer":0,"byteOffset":72,"byteLength":24},{"buffer":0,"byteOffset":96,"byteLength":6}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},{"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"mode":4}]}]})"
     };
     json_chunk.assign(json_text.begin(), json_text.end());
     pad_to_glb_alignment(json_chunk, ds_vk::u8{' '});
 
-    auto unknown_chunk = std::vector<ds_vk::u8>{7u, 5u, 3u, 1u};
+    std::vector<ds_vk::u8> unknown_chunk{7u, 5u, 3u, 1u};
     pad_to_glb_alignment(unknown_chunk, ds_vk::u8{0u});
 
-    constexpr auto k_glb_header_bytes = ds_vk::usize{12zu};
-    constexpr auto k_glb_chunk_header_bytes = ds_vk::usize{8zu};
+    constexpr ds_vk::usize k_glb_header_bytes{12zu};
+    constexpr ds_vk::usize k_glb_chunk_header_bytes{8zu};
     const auto total_length = k_glb_header_bytes + 3zu * k_glb_chunk_header_bytes
                               + json_chunk.size() + bin.size() + unknown_chunk.size();
 
-    auto glb = std::vector<ds_vk::u8>{};
+    std::vector<ds_vk::u8> glb{};
     append_pod(glb, k_glb_magic);
     append_pod(glb, k_glb_version_2);
     append_pod(glb, static_cast<ds_vk::u32>(total_length));
@@ -188,8 +192,8 @@ static_assert(sizeof(ds_vk::PickerShapeType) == sizeof(ds_vk::u8));
 
 auto test_color_types() -> void
 {
-    const auto low = ds_vk::Color{0.0f, 0.25f, 0.5f, 1.0f};
-    const auto high = ds_vk::Color{1.0f, 0.75f, 0.0f, 0.5f};
+    const ds_vk::Color low{0.0f, 0.25f, 0.5f, 1.0f};
+    const ds_vk::Color high{1.0f, 0.75f, 0.0f, 0.5f};
     const auto mixed = ds_vk::mix_color(low, high, 0.25f);
     check(near(mixed.r(), 0.25f), "color mix red channel");
     check(near(mixed.g(), 0.375f), "color mix green channel");
@@ -310,9 +314,12 @@ auto test_gltf_assets() -> void
         check(vertex.normal.z > 0.99f, "gltf loader generated normal points along +z");
     }
 
-    const auto glb_path = std::filesystem::temp_directory_path() / "ds_vk_unknown_chunk_test.glb";
+    const std::hash<std::string> path_hash{};
+    const auto cwd_hash = path_hash(std::filesystem::current_path().string());
+    const auto glb_path = std::filesystem::temp_directory_path()
+                          / std::format("ds_vk_unknown_chunk_test_{}.glb", cwd_hash);
     {
-        auto out = std::ofstream{glb_path, std::ios::binary};
+        std::ofstream out{glb_path, std::ios::binary};
         const auto glb_bytes = make_triangle_glb_with_unknown_chunk();
         out.write(
             reinterpret_cast<const char*>(glb_bytes.data()),
@@ -327,7 +334,7 @@ auto test_gltf_assets() -> void
     {
         auto invalid_glb_bytes = make_triangle_glb_with_unknown_chunk();
         replace_first_glb_chunk_type(invalid_glb_bytes, 0x54534554u);
-        auto out = std::ofstream{glb_path, std::ios::binary};
+        std::ofstream out{glb_path, std::ios::binary};
         out.write(
             reinterpret_cast<const char*>(invalid_glb_bytes.data()),
             static_cast<std::streamsize>(invalid_glb_bytes.size())
@@ -346,12 +353,12 @@ auto test_gltf_assets() -> void
 
     {
         auto invalid_glb_bytes = make_triangle_glb_with_unknown_chunk();
-        constexpr auto k_partial_chunk_header = ds_vk::u32{0x12345678u};
+        constexpr ds_vk::u32 k_partial_chunk_header{0x12345678u};
         append_pod(invalid_glb_bytes, k_partial_chunk_header);
         set_glb_container_length(
             invalid_glb_bytes, static_cast<ds_vk::u32>(invalid_glb_bytes.size())
         );
-        auto out = std::ofstream{glb_path, std::ios::binary};
+        std::ofstream out{glb_path, std::ios::binary};
         out.write(
             reinterpret_cast<const char*>(invalid_glb_bytes.data()),
             static_cast<std::streamsize>(invalid_glb_bytes.size())
@@ -372,7 +379,7 @@ auto test_gltf_assets() -> void
 
 auto test_camera_projection() -> void
 {
-    auto camera = ds_vk::Camera{};
+    ds_vk::Camera camera{};
     camera.distance() = 3.0f;
     const auto position = camera.position();
     check(finite_vec3(position), "camera position is finite");
@@ -390,7 +397,7 @@ auto test_camera_projection() -> void
 
 auto test_camera_config() -> void
 {
-    auto camera = ds_vk::Camera{};
+    ds_vk::Camera camera{};
     auto& configured = camera.configure({
         .pivot = 0.7f * ds_vk::k_axis_z,
         .distance = 5.4f,
@@ -408,7 +415,7 @@ auto test_camera_config() -> void
 
 auto test_geometry_helpers() -> void
 {
-    const auto ray = ds_vk::Ray{
+    const ds_vk::Ray ray{
         .origin = {0.0f, 0.0f, 0.0f},
         .direction = ds_vk::k_axis_x,
     };
@@ -463,7 +470,7 @@ auto test_geometry_helpers() -> void
     );
     check(capsule_hit.has_value(), "ray hits capsule");
 
-    auto camera = ds_vk::Camera{};
+    ds_vk::Camera camera{};
     camera.configure({
         .pivot = {0.0f, 0.0f, 0.0f},
         .distance = 4.0f,
@@ -486,9 +493,9 @@ auto test_geometry_helpers() -> void
 
 auto test_picker_plugin() -> void
 {
-    auto picker = ds_vk::Picker{};
-    const auto sphere_id = ds_vk::ObjectId{.value = 11u};
-    const auto aabb_id = ds_vk::ObjectId{.value = 12u};
+    ds_vk::Picker picker{};
+    const ds_vk::ObjectId sphere_id{.value = 11u};
+    const ds_vk::ObjectId aabb_id{.value = 12u};
     (void) picker.add_sphere({
         .object_id = sphere_id,
         .sphere = {.center = {3.0f, 0.0f, 0.0f}, .radius = 1.0f},
@@ -497,7 +504,7 @@ auto test_picker_plugin() -> void
         .object_id = aabb_id,
         .aabb = {.min = {5.0f, -1.0f, -1.0f}, .max = {6.0f, 1.0f, 1.0f}},
     });
-    const auto ray = ds_vk::Ray{
+    const ds_vk::Ray ray{
         .origin = {0.0f, 0.0f, 0.0f},
         .direction = ds_vk::k_axis_x,
     };
@@ -549,7 +556,7 @@ auto test_picker_plugin() -> void
         "picker supports capsule targets"
     );
 
-    auto camera = ds_vk::Camera{};
+    ds_vk::Camera camera{};
     camera.configure({
         .pivot = {0.0f, 0.0f, 0.0f},
         .distance = 4.0f,
@@ -608,9 +615,104 @@ auto test_picker_plugin() -> void
     );
 }
 
+auto test_manipulator_plugin() -> void
+{
+    ds_vk::Camera camera{};
+    camera.configure({
+        .pivot = {0.0f, 0.0f, 0.0f},
+        .distance = 4.0f,
+        .yaw = 0.0f,
+        .pitch = 0.0f,
+    });
+    const ds_vk::ObjectId id{.value = 88u};
+    std::array selected{id};
+    ds_vk::Transform transform{};
+    ds_vk::Manipulator manipulator{};
+    const ds_vk::ManipulatorCallbacks callbacks{
+        .get_transform = [&](ds_vk::ObjectId object_id) -> std::optional<ds_vk::Transform>
+        {
+            if (object_id.value != id.value)
+            {
+                return std::nullopt;
+            }
+            return transform;
+        },
+        .set_transform = [&](ds_vk::ObjectId object_id, const ds_vk::Transform& updated) -> void
+        {
+            if (object_id.value == id.value)
+            {
+                transform = updated;
+            }
+        },
+    };
+
+    manipulator.update({
+        .input =
+            ds_vk::ManipulatorInput{
+                .camera = camera,
+                .mouse_px = {400.0f, 300.0f},
+                .viewport_px = {800.0f, 600.0f},
+                .translate_pressed = true,
+            },
+        .selected_ids = std::span<const ds_vk::ObjectId>{selected},
+        .callbacks = callbacks,
+    });
+    check(manipulator.active(), "manipulator starts with selected target");
+    manipulator.update({
+        .input =
+            ds_vk::ManipulatorInput{
+                .camera = camera,
+                .mouse_px = {500.0f, 300.0f},
+                .viewport_px = {800.0f, 600.0f},
+            },
+        .selected_ids = std::span<const ds_vk::ObjectId>{selected},
+        .callbacks = callbacks,
+    });
+    check(transform.translation.y > 0.0f, "manipulator translates in camera plane");
+
+    manipulator.update({
+        .input =
+            ds_vk::ManipulatorInput{
+                .camera = camera,
+                .mouse_px = {500.0f, 300.0f},
+                .viewport_px = {800.0f, 600.0f},
+                .cancel_pressed = true,
+            },
+        .selected_ids = std::span<const ds_vk::ObjectId>{selected},
+        .callbacks = callbacks,
+    });
+    check(!manipulator.active(), "manipulator cancel exits active mode");
+    check(near(glm::length(transform.translation), 0.0f), "manipulator cancel restores transform");
+
+    manipulator.update({
+        .input =
+            ds_vk::ManipulatorInput{
+                .camera = camera,
+                .mouse_px = {400.0f, 300.0f},
+                .viewport_px = {800.0f, 600.0f},
+                .scale_pressed = true,
+            },
+        .selected_ids = std::span<const ds_vk::ObjectId>{selected},
+        .callbacks = callbacks,
+    });
+    manipulator.update({
+        .input =
+            ds_vk::ManipulatorInput{
+                .camera = camera,
+                .mouse_px = {520.0f, 300.0f},
+                .viewport_px = {800.0f, 600.0f},
+                .confirm_pressed = true,
+            },
+        .selected_ids = std::span<const ds_vk::ObjectId>{selected},
+        .callbacks = callbacks,
+    });
+    check(!manipulator.active(), "manipulator confirm exits active mode");
+    check(transform.scale.x > 1.0f, "manipulator scales selected target");
+}
+
 auto test_viz_plugin() -> void
 {
-    const auto ramp = ds_vk::viz::ColorRamp{
+    const ds_vk::viz::ColorRamp ramp{
         ds_vk::viz::ColorRampConfig{
             .preset = ds_vk::viz::ColorPreset::blue_red,
             .range = {.min = 0.0f, .max = 10.0f},
@@ -622,22 +724,22 @@ auto test_viz_plugin() -> void
     check(high.r() > high.b(), "blue-red ramp clamps high values to red");
     check(near(ramp.normalized_value(5.0f), 0.5f), "color ramp normalizes scalar values");
 
-    const auto values = std::array{3.0f, -1.0f, 9.0f};
+    const std::array values{3.0f, -1.0f, 9.0f};
     const auto range = ds_vk::viz::range_from_values(values);
     check(near(range.min, -1.0f) and near(range.max, 9.0f), "viz range scans values");
 
-    auto camera = ds_vk::Camera{};
+    ds_vk::Camera camera{};
     camera.configure({
         .pivot = {0.0f, 0.0f, 0.0f},
         .distance = 4.0f,
     });
 
-    auto draw = FakeDrawSink{};
-    const auto positions = std::array{
+    FakeDrawSink draw{};
+    const std::array positions{
         ds_vk::Vec3{0.0f, 0.0f, 0.0f},
         ds_vk::k_axis_x,
     };
-    const auto vectors = std::array{
+    const std::array vectors{
         ds_vk::k_axis_y,
         2.0f * ds_vk::k_axis_y,
     };
@@ -665,8 +767,8 @@ auto test_viz_plugin() -> void
     );
     check(cross_lines == 2u, "viz cross marker draws two lines");
 
-    auto trail_draw = FakeDrawSink{};
-    const auto trail_points = std::array{
+    FakeDrawSink trail_draw{};
+    const std::array trail_points{
         ds_vk::Vec3{0.0f, 0.0f, 0.0f},
         ds_vk::k_axis_x,
         ds_vk::k_axis_x + ds_vk::k_axis_y,
@@ -684,7 +786,7 @@ auto test_viz_plugin() -> void
     check(near(trail_draw.first_line_color.a(), 0.25f), "viz trail applies tail alpha");
     check(near(trail_draw.last_line_color.a(), 0.85f), "viz trail applies head alpha");
 
-    auto aabb_draw = FakeDrawSink{};
+    FakeDrawSink aabb_draw{};
     const auto aabb_segments = ds_vk::viz::draw_aabb(
         aabb_draw,
         ds_vk::viz::AabbMarkerConfig{
@@ -714,6 +816,7 @@ auto main() -> int
         test_camera_config();
         test_geometry_helpers();
         test_picker_plugin();
+        test_manipulator_plugin();
         test_viz_plugin();
     }
     catch (const std::exception& error)
