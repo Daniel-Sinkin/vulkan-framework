@@ -1,26 +1,14 @@
 #include "ds_vk/selection.hpp"
 
+#include "ds_vk/math.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace ds_vk
 {
-namespace
-{
-auto safe_direction(const Vec3 value) noexcept -> Vec3
-{
-    const auto length_squared = glm::dot(value, value);
-    if (length_squared <= 1.0e-12f)
-    {
-        return Vec3{0.0f, 0.0f, -1.0f};
-    }
-    return value * glm::inversesqrt(length_squared);
-}
-}  // namespace
-
-auto make_pick_ray(const Camera& camera, const Vec2 cursor_px, const Vec2 viewport_px) noexcept
-    -> PickRay
+auto make_pick_ray(const Camera& camera, Vec2 cursor_px, Vec2 viewport_px) noexcept -> PickRay
 {
     const auto viewport = glm::max(viewport_px, Vec2{1.0f});
     const auto ndc_x = 2.0f * cursor_px.x / viewport.x - 1.0f;
@@ -34,7 +22,9 @@ auto make_pick_ray(const Camera& camera, const Vec2 cursor_px, const Vec2 viewpo
     near_world /= near_world.w;
     far_world /= far_world.w;
     const auto origin = Vec3{near_world};
-    return PickRay{.origin = origin, .direction = safe_direction(Vec3{far_world - near_world})};
+    return PickRay{
+        .origin = origin, .direction = normalize_or(Vec3{far_world - near_world}, -k_axis_z)
+    };
 }
 
 auto intersect_sphere(const PickRay& ray, const PickSphere& sphere) noexcept -> std::optional<f32>

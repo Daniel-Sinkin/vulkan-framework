@@ -1,5 +1,7 @@
 #include "ds_vk/runtime.hpp"
 
+#include "ds_vk/math.hpp"
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <algorithm>
@@ -137,39 +139,31 @@ struct DebugPushConstants
     Vec4 camera_right{1.0f, 0.0f, 0.0f, 0.0f};
 };
 
-static_assert(sizeof(MeshPushConstants) == 128u);
-static_assert(sizeof(GpuMaterial) == 160u);
-static_assert(offsetof(GpuMaterial, emissive_color) == 16u);
-static_assert(offsetof(GpuMaterial, pbr_params) == 32u);
-static_assert(offsetof(GpuMaterial, texture_params) == 48u);
-static_assert(offsetof(GpuMaterial, render_params) == 64u);
-static_assert(offsetof(GpuMaterial, debug_color) == 80u);
-static_assert(offsetof(GpuMaterial, debug_params) == 96u);
-static_assert(offsetof(GpuMaterial, debug_params2) == 112u);
-static_assert(offsetof(GpuMaterial, camera_position) == 128u);
-static_assert(offsetof(GpuMaterial, camera_forward) == 144u);
-static_assert(sizeof(GpuLight) == 64u);
-static_assert(sizeof(GpuLighting) == 96u + static_cast<usize>(k_max_lights) * sizeof(GpuLight));
-static_assert(sizeof(DebugPushConstants) == 96u);
+// clang-format off
+static_assert(sizeof(MeshPushConstants)              == 128zu);
+static_assert(sizeof(GpuMaterial)                    == 160zu);
+static_assert(offsetof(GpuMaterial, emissive_color)  == 16zu);
+static_assert(offsetof(GpuMaterial, pbr_params)      == 32zu);
+static_assert(offsetof(GpuMaterial, texture_params)  == 48zu);
+static_assert(offsetof(GpuMaterial, render_params)   == 64zu);
+static_assert(offsetof(GpuMaterial, debug_color)     == 80zu);
+static_assert(offsetof(GpuMaterial, debug_params)    == 96zu);
+static_assert(offsetof(GpuMaterial, debug_params2)   == 112zu);
+static_assert(offsetof(GpuMaterial, camera_position) == 128zu);
+static_assert(offsetof(GpuMaterial, camera_forward)  == 144zu);
+static_assert(sizeof(GpuLight)                       == 64zu);
+static_assert(sizeof(GpuLighting)                    == 96zu + static_cast<usize>(k_max_lights) * sizeof(GpuLight));
+static_assert(sizeof(DebugPushConstants)             == 96zu);
+// clang-format on
 constexpr auto k_required_push_constant_bytes =
     std::max(sizeof(MeshPushConstants), sizeof(DebugPushConstants));
-
-[[nodiscard]] auto safe_normalize(const Vec3 value, const Vec3 fallback) noexcept -> Vec3
-{
-    const auto length_squared = glm::dot(value, value);
-    if (length_squared <= 1.0e-12f)
-    {
-        return glm::normalize(fallback);
-    }
-    return value * glm::inversesqrt(length_squared);
-}
 
 [[nodiscard]] auto material_base_color_texture_index(const Material& material) noexcept -> u32
 {
     if (material.textures.base_color.valid()
-        && material.textures.base_color.index < k_max_material_textures)
+        && material.textures.base_color.id < k_max_material_textures)
     {
-        return material.textures.base_color.index;
+        return material.textures.base_color.id;
     }
     return k_default_texture_index;
 }
@@ -178,10 +172,10 @@ auto to_gpu_material(
     const Material& material,
     const MeshRenderMask& mask,
     const MeshDebugConfig& debug,
-    const ObjectId object_id,
-    const f32 time,
-    const Vec3 camera_position,
-    const Vec3 camera_forward
+    ObjectId object_id,
+    f32 time,
+    Vec3 camera_position,
+    Vec3 camera_forward
 ) noexcept -> GpuMaterial
 {
     auto debug_mode = debug.mode;
@@ -257,7 +251,7 @@ auto to_gpu_material(
         .position_range = Vec4{light.position, std::max(0.0f, light.range)},
         .direction_type =
             Vec4{
-                safe_normalize(light.direction, -k_axis_z),
+                normalize_or(light.direction, -k_axis_z),
                 static_cast<f32>(light.type),
             },
         .color_intensity =
@@ -294,9 +288,9 @@ auto to_gpu_material(
     return std::numeric_limits<u32>::max();
 }
 
-[[nodiscard]] auto light_view_matrix(const Vec3 position, const Vec3 direction) noexcept -> Mat4
+[[nodiscard]] auto light_view_matrix(Vec3 position, Vec3 direction) noexcept -> Mat4
 {
-    const auto forward = safe_normalize(direction, -k_axis_z);
+    const auto forward = normalize_or(direction, -k_axis_z);
     const auto up_hint = std::abs(glm::dot(forward, k_axis_z)) > 0.92f ? k_axis_y : k_axis_z;
     return glm::lookAt(position, position + forward, up_hint);
 }
@@ -334,19 +328,19 @@ light_view_projection_matrix(const LightConfig& light, const Camera& camera) noe
                * light_view_matrix(light.position, light.direction);
     }
 
-    const auto direction = safe_normalize(light.direction, -k_axis_z);
+    const auto direction = normalize_or(light.direction, -k_axis_z);
     const auto depth = std::max(light.shadow.far_plane - light.shadow.near_plane, 1.0f);
-    const auto target = camera.pivot;
+    const auto target = camera.pivot();
     const auto position = target - direction * (0.5f * depth);
     return light_projection_matrix(light, camera) * light_view_matrix(position, direction);
 }
 
 [[nodiscard]] auto build_gpu_lighting(
     const std::vector<LightConfig>& lights,
-    const Color ambient_light,
+    Color ambient_light,
     const Camera& camera,
-    const u32 shadow_index,
-    const u32 shadow_resolution
+    u32 shadow_index,
+    u32 shadow_resolution
 ) noexcept -> GpuLighting
 {
     auto lighting = GpuLighting{
@@ -480,7 +474,7 @@ auto DrawList::clear() -> void
     ambient_light_ = Color{0.035f, 0.040f, 0.050f, 1.0f};
 }
 
-auto DrawList::set_ambient_light(const Color color) -> void
+auto DrawList::set_ambient_light(Color color) -> void
 {
     ambient_light_ = color;
 }
@@ -518,12 +512,6 @@ auto DrawList::draw_basic_mesh(const BasicMeshDrawConfig& config) -> void
     );
 }
 
-auto DrawList::draw_basic_mesh(const MeshHandle mesh, const Transform& transform, const Color color)
-    -> void
-{
-    draw_basic_mesh(BasicMeshDrawConfig{.mesh = mesh, .transform = transform, .color = color});
-}
-
 auto DrawList::debug_line(const DebugLineConfig& config) -> void
 {
     debug_segments_.push_back(
@@ -535,12 +523,6 @@ auto DrawList::debug_line(const DebugLineConfig& config) -> void
             .color = config.color,
         }
     );
-}
-
-auto DrawList::debug_line(const Vec3 start, const Vec3 end, const Color color, const f32 width)
-    -> void
-{
-    debug_line(DebugLineConfig{.start = start, .end = end, .color = color, .width = width});
 }
 
 auto DrawList::debug_arrow(const DebugArrowConfig& config) -> void
@@ -556,14 +538,6 @@ auto DrawList::debug_arrow(const DebugArrowConfig& config) -> void
     );
 }
 
-auto DrawList::debug_arrow(const Vec3 origin, const Vec3 vector, const Color color, const f32 width)
-    -> void
-{
-    debug_arrow(
-        DebugArrowConfig{.origin = origin, .vector = vector, .color = color, .width = width}
-    );
-}
-
 auto DrawList::debug_sphere(const DebugSphereConfig& config) -> void
 {
     const auto safe_radius = std::max(0.0f, config.radius);
@@ -573,50 +547,41 @@ auto DrawList::debug_sphere(const DebugSphereConfig& config) -> void
     }
 
     const auto safe_segments = std::max(8u, config.segments);
+    const auto safe_segments_f = static_cast<f32>(safe_segments);
     for (auto i = 0u; i < safe_segments; ++i)
     {
-        const auto t0 =
-            2.0f * std::numbers::pi_v<f32> * static_cast<f32>(i) / static_cast<f32>(safe_segments);
-        const auto t1 = 2.0f * std::numbers::pi_v<f32>
-                        * static_cast<f32>(i + 1u) / static_cast<f32>(safe_segments);
+        const auto pi2 = 2.0f * std::numbers::pi_v<f32>;
+        const auto t0 = pi2 * static_cast<f32>(i) / safe_segments_f;
+        const auto t1 = pi2 * static_cast<f32>(i + 1u) / safe_segments_f;
         const auto c0 = std::cos(t0) * safe_radius;
         const auto s0 = std::sin(t0) * safe_radius;
         const auto c1 = std::cos(t1) * safe_radius;
         const auto s1 = std::sin(t1) * safe_radius;
         debug_line(
-            config.center + Vec3{c0, s0, 0.0f},
-            config.center + Vec3{c1, s1, 0.0f},
-            config.color,
-            config.width
+            DebugLineConfig{
+                .start = config.center + Vec3{c0, s0, 0.0f},
+                .end = config.center + Vec3{c1, s1, 0.0f},
+                .color = config.color,
+                .width = config.width,
+            }
         );
         debug_line(
-            config.center + Vec3{c0, 0.0f, s0},
-            config.center + Vec3{c1, 0.0f, s1},
-            config.color,
-            config.width
+            DebugLineConfig{
+                .start = config.center + Vec3{c0, 0.0f, s0},
+                .end = config.center + Vec3{c1, 0.0f, s1},
+                .color = config.color,
+                .width = config.width,
+            }
         );
         debug_line(
-            config.center + Vec3{0.0f, c0, s0},
-            config.center + Vec3{0.0f, c1, s1},
-            config.color,
-            config.width
+            DebugLineConfig{
+                .start = config.center + Vec3{0.0f, c0, s0},
+                .end = config.center + Vec3{0.0f, c1, s1},
+                .color = config.color,
+                .width = config.width,
+            }
         );
     }
-}
-
-auto DrawList::debug_sphere(
-    const Vec3 center, const f32 radius, const Color color, const u32 segments, const f32 width
-) -> void
-{
-    debug_sphere(
-        DebugSphereConfig{
-            .center = center,
-            .radius = radius,
-            .color = color,
-            .segments = segments,
-            .width = width,
-        }
-    );
 }
 
 auto DrawList::add_light(const LightConfig& config) -> void
@@ -892,7 +857,7 @@ auto Runtime::Impl::end_immediate_commands(const VkCommandBuffer command_buffer)
 }
 
 auto Runtime::Impl::create_texture_resource(
-    const u8* const pixels, const u32 width, const u32 height, const VkFormat format
+    const u8* pixels, u32 width, u32 height, VkFormat format
 ) -> TextureResource
 {
     if (width == 0u || height == 0u || pixels == nullptr)
@@ -1112,10 +1077,10 @@ auto Runtime::Impl::load_texture(
         throw;
     }
     update_mesh_texture_descriptors();
-    return TextureHandle{.index = index};
+    return TextureHandle{.id = index};
 }
 
-auto Runtime::Impl::ensure_debug_buffer(const u32 frame_index, const VkDeviceSize size) -> Buffer&
+auto Runtime::Impl::ensure_debug_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&
 {
     if (debug_segment_buffers.size() < window_data.ImageCount)
     {
@@ -1135,8 +1100,7 @@ auto Runtime::Impl::ensure_debug_buffer(const u32 frame_index, const VkDeviceSiz
     return buffer;
 }
 
-auto Runtime::Impl::ensure_mesh_material_buffer(const u32 frame_index, const VkDeviceSize size)
-    -> Buffer&
+auto Runtime::Impl::ensure_mesh_material_buffer(u32 frame_index, VkDeviceSize size) -> Buffer&
 {
     if (mesh_material_buffers.size() < window_data.ImageCount)
     {
@@ -1157,7 +1121,7 @@ auto Runtime::Impl::ensure_mesh_material_buffer(const u32 frame_index, const VkD
     return buffer;
 }
 
-auto Runtime::Impl::ensure_mesh_lighting_buffer(const u32 frame_index) -> Buffer&
+auto Runtime::Impl::ensure_mesh_lighting_buffer(u32 frame_index) -> Buffer&
 {
     if (mesh_lighting_buffers.size() < window_data.ImageCount)
     {
@@ -1181,8 +1145,7 @@ auto Runtime::Impl::ensure_mesh_lighting_buffer(const u32 frame_index) -> Buffer
     return buffer;
 }
 
-auto Runtime::Impl::update_mesh_material_descriptor(const u32 frame_index, const Buffer& buffer)
-    -> void
+auto Runtime::Impl::update_mesh_material_descriptor(u32 frame_index, const Buffer& buffer) -> void
 {
     if (mesh_descriptor_sets.empty())
     {
@@ -1204,8 +1167,7 @@ auto Runtime::Impl::update_mesh_material_descriptor(const u32 frame_index, const
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-auto Runtime::Impl::update_mesh_lighting_descriptor(const u32 frame_index, const Buffer& buffer)
-    -> void
+auto Runtime::Impl::update_mesh_lighting_descriptor(u32 frame_index, const Buffer& buffer) -> void
 {
     if (mesh_descriptor_sets.empty())
     {
@@ -1345,12 +1307,12 @@ auto Runtime::Impl::upload_mesh(const MeshData& mesh) -> MeshHandle
         destroy_buffer(resource.indices);
         throw;
     }
-    return MeshHandle{.index = index};
+    return MeshHandle{.id = index};
 }
 
-auto Runtime::Impl::replace_mesh(const MeshHandle handle, const MeshData& mesh) -> MeshHandle
+auto Runtime::Impl::replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle
 {
-    if (!handle.valid() || handle.index >= meshes.size())
+    if (!handle.valid() || handle.id >= meshes.size())
     {
         return upload_mesh(mesh);
     }
@@ -1366,8 +1328,8 @@ auto Runtime::Impl::replace_mesh(const MeshHandle handle, const MeshData& mesh) 
         destroy_buffer(replacement.indices);
         throw;
     }
-    auto old = meshes[handle.index];
-    meshes[handle.index] = replacement;
+    auto old = meshes[handle.id];
+    meshes[handle.id] = replacement;
     destroy_buffer(old.vertices);
     destroy_buffer(old.indices);
     return handle;
@@ -1499,7 +1461,7 @@ auto Runtime::Impl::destroy_shadow_map() noexcept -> void
     shadow_map = {};
 }
 
-auto Runtime::Impl::create_depth_attachment(const u32 width, const u32 height) -> DepthAttachment
+auto Runtime::Impl::create_depth_attachment(u32 width, u32 height) -> DepthAttachment
 {
     auto depth = DepthAttachment{};
     VkImageCreateInfo image_info{};
@@ -2426,11 +2388,11 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
     for (const auto& command : mesh_commands)
     {
         if (!command.mask.shadow_producer || !command.mesh.valid()
-            || command.mesh.index >= meshes.size())
+            || command.mesh.id >= meshes.size())
         {
             continue;
         }
-        const auto& mesh = meshes[command.mesh.index];
+        const auto& mesh = meshes[command.mesh.id];
         const auto offsets = std::array<VkDeviceSize, 1>{0};
         const auto vertex_buffers = std::array{mesh.vertices.handle};
         vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers.data(), offsets.data());
@@ -2477,9 +2439,8 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
     );
 }
 
-auto Runtime::Impl::draw_meshes(
-    const VkCommandBuffer command_buffer, const VkExtent2D extent, const u32 frame_index
-) -> void
+auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
+    -> void
 {
     if (draw_list.mesh_commands().empty() || mesh_pipeline == VK_NULL_HANDLE)
     {
@@ -2488,7 +2449,7 @@ auto Runtime::Impl::draw_meshes(
 
     const auto& mesh_commands = draw_list.mesh_commands();
     const auto camera_position = camera.position();
-    const auto camera_forward = safe_normalize(camera.pivot - camera_position, -k_axis_y);
+    const auto camera_forward = normalize_or(camera.pivot() - camera_position, -k_axis_y);
     const auto& lights = draw_list.lights();
     const auto active_shadow_index = shadow_light_index(lights);
     mesh_lighting_upload = build_gpu_lighting(
@@ -2531,15 +2492,15 @@ auto Runtime::Impl::draw_meshes(
         0,
         nullptr
     );
-    for (auto command_index = usize{0}; command_index < mesh_commands.size(); ++command_index)
+    for (auto command_index = 0zu; command_index < mesh_commands.size(); ++command_index)
     {
         const auto& command = mesh_commands[command_index];
         if (!command.mask.visible_to_camera || !command.mesh.valid()
-            || command.mesh.index >= meshes.size())
+            || command.mesh.id >= meshes.size())
         {
             continue;
         }
-        const auto& mesh = meshes[command.mesh.index];
+        const auto& mesh = meshes[command.mesh.id];
         const auto offsets = std::array<VkDeviceSize, 1>{0};
         const auto vertex_buffers = std::array{mesh.vertices.handle};
         vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers.data(), offsets.data());
@@ -2559,9 +2520,8 @@ auto Runtime::Impl::draw_meshes(
     }
 }
 
-auto Runtime::Impl::draw_debug(
-    const VkCommandBuffer command_buffer, const VkExtent2D extent, const u32 frame_index
-) -> void
+auto Runtime::Impl::draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
+    -> void
 {
     if (draw_list.debug_segments().empty() || debug_pipeline == VK_NULL_HANDLE)
     {
@@ -2591,10 +2551,7 @@ auto Runtime::Impl::draw_debug(
 }
 
 auto Runtime::Impl::render_frame(
-    const VkCommandBuffer command_buffer,
-    const VkExtent2D extent,
-    const u32 frame_index,
-    ImDrawData* draw_data
+    VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index, ImDrawData* draw_data
 ) -> void
 {
     const auto viewport = VkViewport{
@@ -2629,33 +2586,33 @@ auto Runtime::Impl::draw_runtime_ui() -> void
     }
     ImGui::PushItemWidth(300.0f);
 
-    auto fov_degrees = glm::degrees(camera.fov_y);
+    auto fov_degrees = glm::degrees(camera.fov_y());
     if (ImGui::SliderFloat("FOV", &fov_degrees, 10.0f, 120.0f, "%.1f deg"))
     {
-        camera.fov_y = glm::radians(std::clamp(fov_degrees, 10.0f, 120.0f));
+        camera.fov_y() = glm::radians(std::clamp(fov_degrees, 10.0f, 120.0f));
     }
-    if (ImGui::SliderFloat("Orbit sensitivity", &camera.orbit_sensitivity, 0.10f, 4.0f, "%.2f"))
+    if (ImGui::SliderFloat("Orbit sensitivity", &camera.orbit_sensitivity(), 0.10f, 4.0f, "%.2f"))
     {
-        camera.orbit_sensitivity = std::clamp(camera.orbit_sensitivity, 0.10f, 4.0f);
+        camera.orbit_sensitivity() = std::clamp(camera.orbit_sensitivity(), 0.10f, 4.0f);
     }
-    if (ImGui::SliderFloat("Pivot sensitivity", &camera.pivot_sensitivity, 0.10f, 4.0f, "%.2f"))
+    if (ImGui::SliderFloat("Pivot sensitivity", &camera.pivot_sensitivity(), 0.10f, 4.0f, "%.2f"))
     {
-        camera.pivot_sensitivity = std::clamp(camera.pivot_sensitivity, 0.10f, 4.0f);
+        camera.pivot_sensitivity() = std::clamp(camera.pivot_sensitivity(), 0.10f, 4.0f);
     }
-    if (ImGui::SliderFloat("Zoom sensitivity", &camera.zoom_sensitivity, 0.10f, 4.0f, "%.2f"))
+    if (ImGui::SliderFloat("Zoom sensitivity", &camera.zoom_sensitivity(), 0.10f, 4.0f, "%.2f"))
     {
-        camera.zoom_sensitivity = std::clamp(camera.zoom_sensitivity, 0.10f, 4.0f);
+        camera.zoom_sensitivity() = std::clamp(camera.zoom_sensitivity(), 0.10f, 4.0f);
     }
 
     const auto projection_labels = std::array{"Perspective", "Orthographic"};
-    auto projection_index = camera.projection_mode == ProjectionMode::orthographic ? 1 : 0;
+    auto projection_index = camera.projection_mode() == ProjectionMode::orthographic ? 1 : 0;
     if (ImGui::Combo("Projection", &projection_index, projection_labels.data(), 2))
     {
-        camera.projection_mode =
+        camera.projection_mode() =
             projection_index == 1 ? ProjectionMode::orthographic : ProjectionMode::perspective;
     }
 
-    ImGui::DragFloat3("Pivot", &camera.pivot.x, 0.01f);
+    ImGui::DragFloat3("Pivot", &camera.pivot().x, 0.01f);
     ImGui::Text(
         "Frame %.2f ms | draw %u | debug %u | lights %u",
         static_cast<double>(stats.last_frame_ms),
@@ -2735,18 +2692,18 @@ auto Runtime::Impl::handle_event(const SDL_Event& event, bool& done, bool& orbit
         SDL_GetWindowSizeInPixels(window, &framebuffer_width, &framebuffer_height);
         if (orbiting)
         {
-            const auto sensitivity = std::clamp(camera.orbit_sensitivity, 0.10f, 4.0f);
-            camera.yaw -= event.motion.xrel * 0.006f * sensitivity;
-            camera.pitch = std::clamp(
-                camera.pitch + event.motion.yrel * 0.006f * sensitivity,
+            const auto sensitivity = std::clamp(camera.orbit_sensitivity(), 0.10f, 4.0f);
+            camera.yaw() -= event.motion.xrel * 0.006f * sensitivity;
+            camera.pitch() = std::clamp(
+                camera.pitch() + event.motion.yrel * 0.006f * sensitivity,
                 glm::radians(-82.0f),
                 glm::radians(82.0f)
             );
         }
         else if (panning)
         {
-            const auto sensitivity = std::clamp(camera.pivot_sensitivity, 0.10f, 4.0f);
-            camera.pivot += camera.pan_offset_world(
+            const auto sensitivity = std::clamp(camera.pivot_sensitivity(), 0.10f, 4.0f);
+            camera.pivot() += camera.pan_offset_world(
                 event.motion.xrel * sensitivity,
                 event.motion.yrel * sensitivity,
                 static_cast<f32>(std::max(1, framebuffer_height))
@@ -2755,13 +2712,13 @@ auto Runtime::Impl::handle_event(const SDL_Event& event, bool& done, bool& orbit
     }
     if (event.type == SDL_EVENT_MOUSE_WHEEL && !io.WantCaptureMouse)
     {
-        const auto sensitivity = std::clamp(camera.zoom_sensitivity, 0.10f, 4.0f);
-        camera.distance *= std::exp(-event.wheel.y * 0.12f * sensitivity);
-        camera.distance = std::clamp(camera.distance, 0.12f, 200.0f);
+        const auto sensitivity = std::clamp(camera.zoom_sensitivity(), 0.10f, 4.0f);
+        camera.distance() *= std::exp(-event.wheel.y * 0.12f * sensitivity);
+        camera.distance() = std::clamp(camera.distance(), 0.12f, 200.0f);
     }
 }
 
-auto Runtime::Impl::framebuffer_mouse_position(const f32 window_x, const f32 window_y) const -> Vec2
+auto Runtime::Impl::framebuffer_mouse_position(f32 window_x, f32 window_y) const -> Vec2
 {
     auto window_width = 1;
     auto window_height = 1;
@@ -2934,7 +2891,7 @@ auto Runtime::Impl::write_capture_png(const SwapchainCapture& capture) -> void
     const auto bgra =
         capture.format == VK_FORMAT_B8G8R8A8_UNORM || capture.format == VK_FORMAT_B8G8R8A8_SRGB;
     auto rgba = std::vector<u8>(
-        static_cast<usize>(capture.width) * static_cast<usize>(capture.height) * 4u
+        static_cast<usize>(capture.width) * static_cast<usize>(capture.height) * 4zu
     );
 
     void* mapped = nullptr;
@@ -2949,11 +2906,11 @@ auto Runtime::Impl::write_capture_png(const SwapchainCapture& capture) -> void
         {
             for (auto x = u32{0}; x < capture.width; ++x)
             {
-                const auto i = (static_cast<usize>(y) * capture.width + x) * 4u;
-                rgba[i + 0u] = bgra ? pixels[i + 2u] : pixels[i + 0u];
-                rgba[i + 1u] = pixels[i + 1u];
-                rgba[i + 2u] = bgra ? pixels[i + 0u] : pixels[i + 2u];
-                rgba[i + 3u] = capture.transparent_background ? pixels[i + 3u] : 255u;
+                const auto i = (static_cast<usize>(y) * capture.width + x) * 4zu;
+                rgba[i + 0zu] = bgra ? pixels[i + 2zu] : pixels[i + 0zu];
+                rgba[i + 1zu] = pixels[i + 1zu];
+                rgba[i + 2zu] = bgra ? pixels[i + 0zu] : pixels[i + 2zu];
+                rgba[i + 3zu] = capture.transparent_background ? pixels[i + 3zu] : 255u;
             }
         }
     }
@@ -3017,7 +2974,7 @@ auto Runtime::Impl::initialize() -> void
         throw std::runtime_error("SDL_Vulkan_GetInstanceExtensions failed");
     }
     auto instance_extensions = std::vector<const char*>{};
-    instance_extensions.reserve(sdl_extension_count + 4u);
+    instance_extensions.reserve(sdl_extension_count + 4zu);
     for (auto i = u32{0}; i < sdl_extension_count; ++i)
     {
         instance_extensions.push_back(sdl_extensions[i]);
@@ -3375,7 +3332,7 @@ auto Runtime::upload_mesh(const MeshData& mesh) -> MeshHandle
     return impl_->upload_mesh(mesh);
 }
 
-auto Runtime::replace_mesh(const MeshHandle handle, const MeshData& mesh) -> MeshHandle
+auto Runtime::replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle
 {
     return impl_->replace_mesh(handle, mesh);
 }

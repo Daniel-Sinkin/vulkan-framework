@@ -1,9 +1,10 @@
 #include "ds_vk/plugins/picker.hpp"
 
+#include "ds_vk/math.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <limits>
 
 namespace ds_vk
 {
@@ -22,17 +23,13 @@ struct ScreenPoint
     f32 depth{};
 };
 
-[[nodiscard]] auto normalize_or(const Vec3 value, const Vec3 fallback) noexcept -> Vec3
+struct FaceDistance
 {
-    const auto length_squared = glm::dot(value, value);
-    if (length_squared <= 1.0e-12f)
-    {
-        return glm::normalize(fallback);
-    }
-    return value * glm::inversesqrt(length_squared);
-}
+    f32 distance{};
+    Vec3 normal{};
+};
 
-[[nodiscard]] auto layer_matches(const u32 layer, const u32 layer_mask) noexcept -> bool
+[[nodiscard]] auto layer_matches(u32 layer, u32 layer_mask) noexcept -> bool
 {
     return (layer & layer_mask) != 0u;
 }
@@ -49,25 +46,25 @@ template <typename Config>
     };
 }
 
-[[nodiscard]] auto aabb_normal_at(const Vec3 position, const Vec3 min, const Vec3 max) noexcept
-    -> Vec3
+[[nodiscard]] auto aabb_normal_at(Vec3 position, Vec3 box_min, Vec3 box_max) noexcept -> Vec3
 {
-    const auto distances = std::array{
-        std::pair{std::abs(position.x - min.x), Vec3{-1.0f, 0.0f, 0.0f}},
-        std::pair{std::abs(position.x - max.x), Vec3{1.0f, 0.0f, 0.0f}},
-        std::pair{std::abs(position.y - min.y), Vec3{0.0f, -1.0f, 0.0f}},
-        std::pair{std::abs(position.y - max.y), Vec3{0.0f, 1.0f, 0.0f}},
-        std::pair{std::abs(position.z - min.z), Vec3{0.0f, 0.0f, -1.0f}},
-        std::pair{std::abs(position.z - max.z), Vec3{0.0f, 0.0f, 1.0f}},
+    const auto face_distances = std::array{
+        FaceDistance{.distance = std::abs(position.x - box_min.x), .normal = -k_axis_x},
+        FaceDistance{.distance = std::abs(position.x - box_max.x), .normal = k_axis_x},
+        FaceDistance{.distance = std::abs(position.y - box_min.y), .normal = -k_axis_y},
+        FaceDistance{.distance = std::abs(position.y - box_max.y), .normal = k_axis_y},
+        FaceDistance{.distance = std::abs(position.z - box_min.z), .normal = -k_axis_z},
+        FaceDistance{.distance = std::abs(position.z - box_max.z), .normal = k_axis_z},
     };
     const auto best = std::ranges::min_element(
-        distances,
-        [](const auto& lhs, const auto& rhs) noexcept -> bool { return lhs.first < rhs.first; }
+        face_distances,
+        [](const FaceDistance& lhs, const FaceDistance& rhs) noexcept -> bool
+        { return lhs.distance < rhs.distance; }
     );
-    return best == distances.end() ? Vec3{0.0f, 0.0f, 1.0f} : best->second;
+    return best == face_distances.end() ? k_axis_z : best->normal;
 }
 
-[[nodiscard]] auto sphere_hit(const PickRay& ray, const Vec3 center, const f32 radius) noexcept
+[[nodiscard]] auto sphere_hit(const PickRay& ray, Vec3 center, f32 radius) noexcept
     -> std::optional<RayHit>
 {
     const auto distance = intersect_sphere(ray, PickSphere{.center = center, .radius = radius});
@@ -83,16 +80,16 @@ template <typename Config>
     };
 }
 
-[[nodiscard]] auto aabb_hit(const PickRay& ray, const Vec3 min, const Vec3 max) noexcept
+[[nodiscard]] auto aabb_hit(const PickRay& ray, Vec3 corner_a, Vec3 corner_b) noexcept
     -> std::optional<RayHit>
 {
-    const auto distance = intersect_aabb(ray, PickAabb{.min = min, .max = max});
+    const auto distance = intersect_aabb(ray, PickAabb{.min = corner_a, .max = corner_b});
     if (!distance.has_value())
     {
         return std::nullopt;
     }
-    const auto box_min = glm::min(min, max);
-    const auto box_max = glm::max(min, max);
+    const auto box_min = glm::min(corner_a, corner_b);
+    const auto box_max = glm::max(corner_a, corner_b);
     const auto position = ray.origin + *distance * ray.direction;
     return RayHit{
         .distance = *distance,
@@ -135,7 +132,7 @@ template <typename Config>
         return sphere_hit(ray, capsule.a, radius);
     }
 
-    const auto ray_direction = normalize_or(ray.direction, {1.0f, 0.0f, 0.0f});
+    const auto ray_direction = normalize_or(ray.direction, k_axis_x);
     const auto ray_to_a = ray.origin - capsule.a;
     const auto ray_segment_dot = glm::dot(ray_direction, segment);
     const auto ray_to_a_dot_ray = glm::dot(ray_to_a, ray_direction);
@@ -177,8 +174,7 @@ template <typename Config>
     };
 }
 
-[[nodiscard]] auto
-project_to_screen(const Camera& camera, const Vec3 position, const Vec2 viewport_px) noexcept
+[[nodiscard]] auto project_to_screen(const Camera& camera, Vec3 position, Vec2 viewport_px) noexcept
     -> std::optional<ScreenPoint>
 {
     const auto viewport = glm::max(viewport_px, Vec2{1.0f});
@@ -206,8 +202,8 @@ project_to_screen(const Camera& camera, const Vec3 position, const Vec2 viewport
     const PickRay& ray,
     const PickerScreenSegmentConfig& segment,
     const Camera& camera,
-    const Vec2 mouse_px,
-    const Vec2 viewport_px
+    Vec2 mouse_px,
+    Vec2 viewport_px
 ) noexcept -> std::optional<RayHit>
 {
     const auto start = project_to_screen(camera, segment.start, viewport_px);

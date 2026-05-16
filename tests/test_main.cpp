@@ -47,19 +47,17 @@ struct FakeDrawSink
     ds_vk::Vec3 last_arrow_vector{};
     ds_vk::Color last_arrow_color;
 
-    auto debug_line(ds_vk::Vec3, ds_vk::Vec3, ds_vk::Color, ds_vk::f32) noexcept -> void
+    auto debug_line(const auto&) noexcept -> void
     {
         ++line_count;
     }
 
-    auto
-    debug_arrow(ds_vk::Vec3 origin, ds_vk::Vec3 vector, ds_vk::Color color, ds_vk::f32) noexcept
-        -> void
+    auto debug_arrow(const auto& config) noexcept -> void
     {
         ++arrow_count;
-        last_arrow_origin = origin;
-        last_arrow_vector = vector;
-        last_arrow_color = color;
+        last_arrow_origin = config.origin;
+        last_arrow_vector = config.vector;
+        last_arrow_color = config.color;
     }
 };
 
@@ -67,6 +65,8 @@ template <typename T>
 concept Addable = requires(T a, T b) { a + b; };
 
 static_assert(!Addable<ds_vk::Color>);
+static_assert(sizeof(ds_vk::ProjectionMode) == sizeof(ds_vk::u8));
+static_assert(sizeof(ds_vk::PickerShapeType) == sizeof(ds_vk::u8));
 
 auto test_color_types() -> void
 {
@@ -165,17 +165,17 @@ auto test_sphere_mesh() -> void
 auto test_camera_projection() -> void
 {
     auto camera = ds_vk::Camera{};
-    camera.distance = 3.0f;
+    camera.distance() = 3.0f;
     const auto position = camera.position();
     check(finite_vec3(position), "camera position is finite");
-    check(near(glm::length(position - camera.pivot), 3.0f, 1.0e-4f), "camera distance");
+    check(near(glm::length(position - camera.pivot()), 3.0f, 1.0e-4f), "camera distance");
     const auto view = camera.view_matrix();
     const auto projection = camera.projection_matrix(16.0f / 9.0f);
     check(std::isfinite(view[0][0]), "view matrix is finite");
     check(std::isfinite(projection[0][0]), "projection matrix is finite");
     check(projection[1][1] < 0.0f, "projection matrix uses Vulkan inverted Y");
 
-    camera.pitch = glm::half_pi<ds_vk::f32>();
+    camera.pitch() = glm::half_pi<ds_vk::f32>();
     check(finite_vec3(camera.right()), "camera right vector is finite at vertical pitch");
     check(finite_vec3(camera.up()), "camera up vector is finite at vertical pitch");
 }
@@ -191,11 +191,11 @@ auto test_camera_config() -> void
     });
 
     check(&configured == &camera, "camera config returns the configured camera");
-    check(near(camera.pivot.z, 0.7f), "camera config pivot");
-    check(near(camera.distance, 5.4f), "camera config distance");
-    check(near(camera.yaw, glm::radians(42.0f)), "camera config yaw");
-    check(near(camera.pitch, glm::radians(25.0f)), "camera config pitch");
-    check(near(camera.fov_y, glm::radians(55.0f)), "camera config preserves defaults");
+    check(near(camera.pivot().z, 0.7f), "camera config pivot");
+    check(near(camera.distance(), 5.4f), "camera config distance");
+    check(near(camera.yaw(), glm::radians(42.0f)), "camera config yaw");
+    check(near(camera.pitch(), glm::radians(25.0f)), "camera config pitch");
+    check(near(camera.fov_y(), glm::radians(55.0f)), "camera config preserves defaults");
 }
 
 auto test_selection_helpers() -> void
@@ -294,16 +294,16 @@ auto test_picker_plugin() -> void
     auto picker = ds_vk::Picker{};
     const auto sphere_id = ds_vk::ObjectId{.value = 11u};
     const auto aabb_id = ds_vk::ObjectId{.value = 12u};
-    picker.add_sphere({
+    static_cast<void>(picker.add_sphere({
         .object_id = sphere_id,
         .center = {3.0f, 0.0f, 0.0f},
         .radius = 1.0f,
-    });
-    picker.add_aabb({
+    }));
+    static_cast<void>(picker.add_aabb({
         .object_id = aabb_id,
         .min = {5.0f, -1.0f, -1.0f},
         .max = {6.0f, 1.0f, 1.0f},
-    });
+    }));
     const auto ray = ds_vk::PickRay{
         .origin = {0.0f, 0.0f, 0.0f},
         .direction = {1.0f, 0.0f, 0.0f},
@@ -317,12 +317,12 @@ auto test_picker_plugin() -> void
     }
 
     picker.clear();
-    picker.add_sphere({
+    static_cast<void>(picker.add_sphere({
         .object_id = {.value = 20u},
         .layer = 1u << 2u,
         .center = {2.0f, 0.0f, 0.0f},
         .radius = 0.5f,
-    });
+    }));
     check(
         !picker.raycast({.ray = ray, .layer_mask = 1u << 1u}).has_value(),
         "picker raycast respects layer mask misses"
@@ -333,11 +333,11 @@ auto test_picker_plugin() -> void
     );
 
     picker.clear();
-    picker.add_obb({
+    static_cast<void>(picker.add_obb({
         .object_id = {.value = 30u},
         .center = {0.0f, 3.0f, 0.0f},
         .half_extent = {0.5f, 0.5f, 0.5f},
-    });
+    }));
     const auto obb_hit = picker.raycast({
         .origin = {0.0f, 0.0f, 0.0f},
         .direction = {0.0f, 1.0f, 0.0f},
@@ -345,12 +345,12 @@ auto test_picker_plugin() -> void
     check(obb_hit.has_value() && obb_hit->object_id.value == 30u, "picker supports obb targets");
 
     picker.clear();
-    picker.add_capsule({
+    static_cast<void>(picker.add_capsule({
         .object_id = {.value = 40u},
         .a = {0.0f, 0.0f, -1.0f},
         .b = {0.0f, 0.0f, 1.0f},
         .radius = 0.25f,
-    });
+    }));
     const auto capsule_hit = picker.raycast({
         .origin = {-2.0f, 0.0f, 0.0f},
         .direction = {1.0f, 0.0f, 0.0f},
@@ -368,11 +368,11 @@ auto test_picker_plugin() -> void
         .pitch = 0.0f,
     });
     picker.clear();
-    picker.add_sphere({
+    static_cast<void>(picker.add_sphere({
         .object_id = {.value = 50u},
         .center = {0.0f, 0.0f, 0.0f},
         .radius = 1.0f,
-    });
+    }));
     const auto click_hit = picker.click({
         .camera = camera,
         .mouse_px = {400.0f, 300.0f},
@@ -383,12 +383,12 @@ auto test_picker_plugin() -> void
     );
 
     picker.clear();
-    picker.add_screen_segment({
+    static_cast<void>(picker.add_screen_segment({
         .object_id = {.value = 60u},
         .start = {0.0f, -0.5f, 0.0f},
         .end = {0.0f, 0.5f, 0.0f},
         .radius_px = 12.0f,
-    });
+    }));
     const auto segment_hit = picker.click({
         .camera = camera,
         .mouse_px = {400.0f, 300.0f},
@@ -405,12 +405,12 @@ auto test_picker_plugin() -> void
     const auto above_center_px =
         ds_vk::Vec2{(clip.x * 0.5f + 0.5f) * 800.0f, (clip.y * 0.5f + 0.5f) * 600.0f};
     picker.clear();
-    picker.add_screen_segment({
+    static_cast<void>(picker.add_screen_segment({
         .object_id = {.value = 61u},
         .start = {0.0f, -0.2f, 1.0f},
         .end = {0.0f, 0.2f, 1.0f},
         .radius_px = 8.0f,
-    });
+    }));
     const auto above_segment_hit = picker.click({
         .camera = camera,
         .mouse_px = above_center_px,
@@ -449,11 +449,11 @@ auto test_viz_plugin() -> void
     auto draw = FakeDrawSink{};
     const auto positions = std::array{
         ds_vk::Vec3{0.0f, 0.0f, 0.0f},
-        ds_vk::Vec3{1.0f, 0.0f, 0.0f},
+        ds_vk::k_axis_x,
     };
     const auto vectors = std::array{
-        ds_vk::Vec3{0.0f, 1.0f, 0.0f},
-        ds_vk::Vec3{0.0f, 2.0f, 0.0f},
+        ds_vk::k_axis_y,
+        2.0f * ds_vk::k_axis_y,
     };
     const auto arrows = ds_vk::viz::draw_vector_field(
         draw,
@@ -463,7 +463,7 @@ auto test_viz_plugin() -> void
             .scale = 0.5f,
             .color_by_magnitude = true,
             .color_ramp = ramp,
-            .max_vectors = 1u,
+            .max_vectors = 1zu,
         }
     );
     check(arrows == 1u && draw.arrow_count == 1u, "viz vector field respects max_vectors");

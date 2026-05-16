@@ -11,15 +11,7 @@ namespace ds_vk
 {
 namespace
 {
-auto push_face(
-    MeshData& mesh,
-    const Vec3 a,
-    const Vec3 b,
-    const Vec3 c,
-    const Vec3 d,
-    const Vec3 normal,
-    const Color color
-) -> void
+auto push_face(MeshData& mesh, Vec3 a, Vec3 b, Vec3 c, Vec3 d, Vec3 normal, Color color) -> void
 {
     const auto base = static_cast<u32>(mesh.vertices.size());
     mesh.vertices.push_back(
@@ -48,7 +40,7 @@ auto Transform::matrix() const noexcept -> Mat4
     return translation_matrix * rotation_matrix * scale_matrix;
 }
 
-auto make_quad(const f32 side_length, const Color color) -> MeshData
+auto make_quad(f32 side_length, Color color) -> MeshData
 {
     const auto half = 0.5f * std::max(0.0f, side_length);
     auto mesh = MeshData{};
@@ -82,12 +74,12 @@ auto make_quad(const f32 side_length, const Color color) -> MeshData
     return mesh;
 }
 
-auto make_cube(const f32 side_length, const Color color) -> MeshData
+auto make_cube(f32 side_length, Color color) -> MeshData
 {
     const auto half = 0.5f * std::max(0.0f, side_length);
     auto mesh = MeshData{};
-    mesh.vertices.reserve(24u);
-    mesh.indices.reserve(36u);
+    mesh.vertices.reserve(24zu);
+    mesh.indices.reserve(36zu);
 
     push_face(
         mesh,
@@ -95,7 +87,7 @@ auto make_cube(const f32 side_length, const Color color) -> MeshData
         {half, -half, half},
         {half, half, half},
         {-half, half, half},
-        {0.0f, 0.0f, 1.0f},
+        k_axis_z,
         color
     );
     push_face(
@@ -104,7 +96,7 @@ auto make_cube(const f32 side_length, const Color color) -> MeshData
         {-half, -half, -half},
         {-half, half, -half},
         {half, half, -half},
-        {0.0f, 0.0f, -1.0f},
+        -k_axis_z,
         color
     );
     push_face(
@@ -113,7 +105,7 @@ auto make_cube(const f32 side_length, const Color color) -> MeshData
         {half, -half, -half},
         {half, half, -half},
         {half, half, half},
-        {1.0f, 0.0f, 0.0f},
+        k_axis_x,
         color
     );
     push_face(
@@ -122,7 +114,7 @@ auto make_cube(const f32 side_length, const Color color) -> MeshData
         {-half, -half, half},
         {-half, half, half},
         {-half, half, -half},
-        {-1.0f, 0.0f, 0.0f},
+        -k_axis_x,
         color
     );
     push_face(
@@ -131,7 +123,7 @@ auto make_cube(const f32 side_length, const Color color) -> MeshData
         {half, half, half},
         {half, half, -half},
         {-half, half, -half},
-        {0.0f, 1.0f, 0.0f},
+        k_axis_y,
         color
     );
     push_face(
@@ -140,22 +132,21 @@ auto make_cube(const f32 side_length, const Color color) -> MeshData
         {half, -half, -half},
         {half, -half, half},
         {-half, -half, half},
-        {0.0f, -1.0f, 0.0f},
+        -k_axis_y,
         color
     );
 
     return mesh;
 }
 
-auto make_uv_sphere(const f32 radius, const u32 slices_raw, const u32 stacks_raw, const Color color)
-    -> MeshData
+auto make_uv_sphere(f32 radius, u32 slices_raw, u32 stacks_raw, Color color) -> MeshData
 {
     const auto slices = std::max(3u, slices_raw);
     const auto stacks = std::max(2u, stacks_raw);
     const auto safe_radius = std::max(0.0f, radius);
     auto mesh = MeshData{};
     mesh.vertices.reserve(static_cast<usize>(slices + 1u) * static_cast<usize>(stacks + 1u));
-    mesh.indices.reserve(static_cast<usize>(slices) * static_cast<usize>(stacks) * 6u);
+    mesh.indices.reserve(static_cast<usize>(slices) * static_cast<usize>(stacks) * 6zu);
 
     for (u32 stack = 0; stack <= stacks; ++stack)
     {
@@ -219,13 +210,13 @@ auto bounds_of(const MeshData& mesh) -> Bounds
 
 auto triangle_count(const MeshData& mesh) noexcept -> usize
 {
-    return mesh.indices.size() / 3u;
+    return mesh.indices.size() / 3zu;
 }
 
 auto has_valid_indices(const MeshData& mesh) noexcept -> bool
 {
     return std::ranges::all_of(
-        mesh.indices, [&](const u32 index) -> bool { return index < mesh.vertices.size(); }
+        mesh.indices, [&](u32 index) -> bool { return index < mesh.vertices.size(); }
     );
 }
 }  // namespace ds_vk

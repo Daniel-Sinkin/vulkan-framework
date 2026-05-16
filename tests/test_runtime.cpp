@@ -50,7 +50,7 @@ auto test_draw_list() -> void
     check(draw.mesh_commands().empty(), "invalid mesh handles are ignored");
 
     draw.draw_mesh({
-        .mesh = ds_vk::MeshHandle{.index = 0u},
+        .mesh = ds_vk::MeshHandle{.id = 0u},
         .object_id = {.value = 42u},
         .material =
             {
@@ -59,7 +59,7 @@ auto test_draw_list() -> void
                 .metallic = 0.35f,
                 .roughness = 0.47f,
                 .ambient_occlusion = 0.82f,
-                .textures = {.base_color = ds_vk::TextureHandle{.index = 5u}},
+                .textures = {.base_color = ds_vk::TextureHandle{.id = 5u}},
             },
         .debug = {
             .mode = ds_vk::MeshDebugMode::scalar_heatmap,
@@ -92,7 +92,7 @@ auto test_draw_list() -> void
         "mesh draw records material ambient occlusion"
     );
     check(
-        draw.mesh_commands().back().material.textures.base_color.index == 5u,
+        draw.mesh_commands().back().material.textures.base_color.id == 5u,
         "mesh draw records material base color texture"
     );
     check(
@@ -102,7 +102,7 @@ auto test_draw_list() -> void
     check(draw.mesh_commands().back().debug.selected, "mesh draw records selected debug flag");
 
     draw.draw_mesh({
-        .mesh = ds_vk::MeshHandle{.index = 8u},
+        .mesh = ds_vk::MeshHandle{.id = 8u},
         .mask = {.visible_to_camera = false, .shadow_producer = true},
     });
     check(draw.mesh_commands().size() == 2u, "shadow-only mesh draw is recorded");
@@ -115,19 +115,19 @@ auto test_draw_list() -> void
     );
 
     draw.draw_mesh({
-        .mesh = ds_vk::MeshHandle{.index = 9u},
+        .mesh = ds_vk::MeshHandle{.id = 9u},
         .mask = {.visible_to_camera = false, .shadow_producer = false},
     });
     check(draw.mesh_commands().size() == 2u, "fully invisible mesh draw is culled");
 
     draw.draw_mesh({
-        .mesh = ds_vk::MeshHandle{.index = 3u},
+        .mesh = ds_vk::MeshHandle{.id = 3u},
         .debug = {.hidden = true},
     });
     check(draw.mesh_commands().size() == 2u, "hidden mesh draws are culled");
 
     draw.draw_mesh({
-        .mesh = ds_vk::MeshHandle{.index = 4u},
+        .mesh = ds_vk::MeshHandle{.id = 4u},
         .object_id = {.value = std::numeric_limits<ds_vk::u32>::max()},
     });
     check(
@@ -135,7 +135,7 @@ auto test_draw_list() -> void
     );
 
     draw.draw_basic_mesh({
-        .mesh = ds_vk::MeshHandle{.index = 1u},
+        .mesh = ds_vk::MeshHandle{.id = 1u},
         .object_id = {.value = 7u},
         .color = ds_vk::Color{0.8f, 0.7f, 0.6f, 1.0f},
         .debug = {

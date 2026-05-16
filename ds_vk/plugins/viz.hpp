@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ds_vk/camera.hpp"
+#include "ds_vk/debug_draw.hpp"
 #include "ds_vk/types.hpp"
 
 #include <algorithm>
@@ -10,7 +11,7 @@
 
 namespace ds_vk::viz
 {
-enum class ColorPreset : u32
+enum class ColorPreset : u8
 {
     grayscale = 0,
     blue_red = 1,
@@ -78,9 +79,9 @@ auto draw_vector_field(DrawSink& draw, const VectorFieldConfig& config) -> usize
 {
     const auto count =
         std::min({config.positions.size(), config.vectors.size(), config.max_vectors});
-    auto drawn = usize{};
+    auto drawn = 0zu;
     const auto min_length_squared = config.min_vector_length * config.min_vector_length;
-    for (auto i = usize{}; i < count; ++i)
+    for (auto i = 0zu; i < count; ++i)
     {
         const auto vector = config.vectors[i];
         const auto length_squared = glm::dot(vector, vector);
@@ -89,7 +90,14 @@ auto draw_vector_field(DrawSink& draw, const VectorFieldConfig& config) -> usize
             const auto color = config.color_by_magnitude
                                    ? config.color_ramp.sample(std::sqrt(length_squared))
                                    : config.color;
-            draw.debug_arrow(config.positions[i], vector * config.scale, color, config.width);
+            draw.debug_arrow(
+                DebugArrowConfig{
+                    .origin = config.positions[i],
+                    .vector = vector * config.scale,
+                    .color = color,
+                    .width = config.width,
+                }
+            );
             ++drawn;
         }
     }
@@ -102,23 +110,27 @@ auto draw_cross_marker(DrawSink& draw, const CrossMarkerConfig& config) -> usize
     const auto radius = std::max(0.0f, config.radius);
     if (radius <= 0.0f)
     {
-        return 0u;
+        return 0zu;
     }
 
     const auto right = config.camera.right();
     const auto up = config.camera.up();
     draw.debug_line(
-        config.center - radius * right - radius * up,
-        config.center + radius * right + radius * up,
-        config.color,
-        config.width
+        DebugLineConfig{
+            .start = config.center - radius * right - radius * up,
+            .end = config.center + radius * right + radius * up,
+            .color = config.color,
+            .width = config.width,
+        }
     );
     draw.debug_line(
-        config.center - radius * right + radius * up,
-        config.center + radius * right - radius * up,
-        config.color,
-        config.width
+        DebugLineConfig{
+            .start = config.center - radius * right + radius * up,
+            .end = config.center + radius * right - radius * up,
+            .color = config.color,
+            .width = config.width,
+        }
     );
-    return 2u;
+    return 2zu;
 }
 }  // namespace ds_vk::viz

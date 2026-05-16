@@ -1,3 +1,4 @@
+#include "ds_vk/math.hpp"
 #include "ds_vk/plugins/picker.hpp"
 #include "ds_vk/plugins/viz.hpp"
 #include "ds_vk/runtime.hpp"
@@ -29,16 +30,6 @@ constexpr auto k_selection_color = Color{1.0f, 0.0f, 0.85f, 0.86f};
 [[nodiscard]] auto asset_path(const std::filesystem::path& relative) -> std::filesystem::path
 {
     return std::filesystem::path{DS_VK_ASSET_DIR} / relative;
-}
-
-[[nodiscard]] auto normalized_or(const Vec3 value, const Vec3 fallback) noexcept -> Vec3
-{
-    const auto length_squared = glm::dot(value, value);
-    if (length_squared <= 1.0e-12f)
-    {
-        return glm::normalize(fallback);
-    }
-    return value * glm::inversesqrt(length_squared);
 }
 
 class BasicViewerApp final
@@ -136,19 +127,19 @@ class BasicViewerApp final
         {
             const auto& cfg = debug_axis_cfg_;
             frame.draw.debug_arrow({
-                .origin = cfg.pos,
+                .origin = cfg.origin,
                 .vector = cfg.arrow_length * k_axis_x,
-                .color = cfg.color_x,
+                .color = cfg.x_color,
             });
             frame.draw.debug_arrow({
-                .origin = cfg.pos,
+                .origin = cfg.origin,
                 .vector = cfg.arrow_length * k_axis_y,
-                .color = cfg.color_y,
+                .color = cfg.y_color,
             });
             frame.draw.debug_arrow({
-                .origin = cfg.pos,
+                .origin = cfg.origin,
                 .vector = cfg.arrow_length * k_axis_z,
-                .color = cfg.color_z,
+                .color = cfg.z_color,
             });
         }
         if (show_debug_overlays && show_vector_field_)
@@ -236,43 +227,51 @@ class BasicViewerApp final
             ImGui::Checkbox("Hide cube", &hide_cube_);
             ImGui::Checkbox("Light gizmos", &show_light_gizmos_);
             ImGui::Separator();
-            ImGui::ColorEdit3("Ambient", lights_.ambient.data());
-            ImGui::Checkbox("Directional light", &lights_.sun.enabled);
-            ImGui::DragFloat3("Sun direction", &lights_.sun.direction.x, 0.02f);
-            ImGui::SliderFloat("Sun intensity", &lights_.sun.intensity, 0.0f, 6.0f, "%.2f");
-            ImGui::SliderFloat("Shadow bias", &lights_.sun.shadow.bias, 0.0001f, 0.02f, "%.4f");
-            ImGui::SliderFloat("Shadow strength", &lights_.sun.shadow.strength, 0.0f, 1.0f, "%.2f");
-            ImGui::Checkbox("Radial light", &lights_.radial.enabled);
-            ImGui::DragFloat3("Radial position", &lights_.radial.position.x, 0.03f);
-            ImGui::SliderFloat("Radial intensity", &lights_.radial.intensity, 0.0f, 30.0f, "%.2f");
-            ImGui::SliderFloat("Radial range", &lights_.radial.range, 0.5f, 10.0f, "%.2f");
-            ImGui::Checkbox("Spot light", &lights_.spot.enabled);
-            ImGui::DragFloat3("Spot position", &lights_.spot.position.x, 0.03f);
-            ImGui::DragFloat3("Spot direction", &lights_.spot.direction.x, 0.02f);
-            ImGui::SliderFloat("Spot intensity", &lights_.spot.intensity, 0.0f, 60.0f, "%.2f");
-            ImGui::SliderFloat("Spot range", &lights_.spot.range, 0.5f, 12.0f, "%.2f");
+            {  // Light
+                ImGui::ColorEdit3("Ambient", lights_.ambient.data());
+                ImGui::Checkbox("Directional light", &lights_.sun.enabled);
+                ImGui::DragFloat3("Sun direction", &lights_.sun.direction.x, 0.02f);
+                ImGui::SliderFloat("Sun intensity", &lights_.sun.intensity, 0.0f, 6.0f, "%.2f");
+                ImGui::SliderFloat("Shadow bias", &lights_.sun.shadow.bias, 0.0001f, 0.02f, "%.4f");
+                ImGui::SliderFloat(
+                    "Shadow strength", &lights_.sun.shadow.strength, 0.0f, 1.0f, "%.2f"
+                );
+                ImGui::Checkbox("Radial light", &lights_.radial.enabled);
+                ImGui::DragFloat3("Radial position", &lights_.radial.position.x, 0.03f);
+                ImGui::SliderFloat(
+                    "Radial intensity", &lights_.radial.intensity, 0.0f, 30.0f, "%.2f"
+                );
+                ImGui::SliderFloat("Radial range", &lights_.radial.range, 0.5f, 10.0f, "%.2f");
+                ImGui::Checkbox("Spot light", &lights_.spot.enabled);
+                ImGui::DragFloat3("Spot position", &lights_.spot.position.x, 0.03f);
+                ImGui::DragFloat3("Spot direction", &lights_.spot.direction.x, 0.02f);
+                ImGui::SliderFloat("Spot intensity", &lights_.spot.intensity, 0.0f, 60.0f, "%.2f");
+                ImGui::SliderFloat("Spot range", &lights_.spot.range, 0.5f, 12.0f, "%.2f");
+            }
             ImGui::Separator();
-            ImGui::DragFloat3("Sphere position", &sphere_position_.x, 0.025f);
-            ImGui::SliderFloat("Sphere radius", &sphere_radius_, 0.1f, 2.0f, "%.2f");
-            ImGui::ColorEdit4(
-                "Sphere base color",
-                materials_.sphere.base_color.data(),
-                ImGuiColorEditFlags_NoInputs
-            );
-            ImGui::ColorEdit3("Sphere emissive", materials_.sphere.emissive_color.data());
-            ImGui::SliderFloat("Sphere metallic", &materials_.sphere.metallic, 0.0f, 1.0f);
-            ImGui::SliderFloat("Sphere roughness", &materials_.sphere.roughness, 0.04f, 1.0f);
-            ImGui::SliderFloat("Sphere AO", &materials_.sphere.ambient_occlusion, 0.0f, 1.0f);
-            auto slices = static_cast<int>(sphere_slices_);
-            auto stacks = static_cast<int>(sphere_stacks_);
-            auto changed = false;
-            changed |= ImGui::SliderInt("Sphere slices", &slices, 8, 96);
-            changed |= ImGui::SliderInt("Sphere stacks", &stacks, 4, 64);
-            sphere_slices_ = static_cast<ds_vk::u32>(std::clamp(slices, 8, 96));
-            sphere_stacks_ = static_cast<ds_vk::u32>(std::clamp(stacks, 4, 64));
-            if (changed || ImGui::Button("Rebuild sphere mesh"))
-            {
-                rebuild_sphere();
+            {  // Sphere
+                ImGui::DragFloat3("Sphere position", &sphere_position_.x, 0.025f);
+                ImGui::SliderFloat("Sphere radius", &sphere_radius_, 0.1f, 2.0f, "%.2f");
+                ImGui::ColorEdit4(
+                    "Sphere base color",
+                    materials_.sphere.base_color.data(),
+                    ImGuiColorEditFlags_NoInputs
+                );
+                ImGui::ColorEdit3("Sphere emissive", materials_.sphere.emissive_color.data());
+                ImGui::SliderFloat("Sphere metallic", &materials_.sphere.metallic, 0.0f, 1.0f);
+                ImGui::SliderFloat("Sphere roughness", &materials_.sphere.roughness, 0.04f, 1.0f);
+                ImGui::SliderFloat("Sphere AO", &materials_.sphere.ambient_occlusion, 0.0f, 1.0f);
+                auto slices = static_cast<int>(sphere_slices_);
+                auto stacks = static_cast<int>(sphere_stacks_);
+                auto changed = false;
+                changed |= ImGui::SliderInt("Sphere slices", &slices, 8, 96);
+                changed |= ImGui::SliderInt("Sphere stacks", &stacks, 4, 64);
+                sphere_slices_ = static_cast<ds_vk::u32>(std::clamp(slices, 8, 96));
+                sphere_stacks_ = static_cast<ds_vk::u32>(std::clamp(stacks, 4, 64));
+                if (changed || ImGui::Button("Rebuild sphere mesh"))
+                {
+                    rebuild_sphere();
+                }
             }
             ImGui::Separator();
             ImGui::Text(
@@ -306,13 +305,12 @@ class BasicViewerApp final
     }
 
   private:
-    [[nodiscard]] auto is_selected(const ObjectId object_id) const noexcept -> bool
+    [[nodiscard]] auto is_selected(ObjectId object_id) const noexcept -> bool
     {
         return selected_object_id_.valid() && selected_object_id_.value == object_id.value;
     }
 
-    [[nodiscard]] auto
-    object_debug_config(const ObjectId object_id, const bool hidden = false) const noexcept
+    [[nodiscard]] auto object_debug_config(ObjectId object_id, bool hidden = false) const noexcept
         -> MeshDebugConfig
     {
         auto debug = MeshDebugConfig{.hidden = hidden};
@@ -369,7 +367,7 @@ class BasicViewerApp final
     {
         if (lights_.sun.enabled)
         {
-            const auto sun_dir = normalized_or(lights_.sun.direction, -k_axis_z);
+            const auto sun_dir = normalize_or(lights_.sun.direction, -k_axis_z);
             draw.debug_arrow({
                 .origin = {-2.8f, -2.8f, 2.1f},
                 .vector = 0.9f * sun_dir,
@@ -391,7 +389,7 @@ class BasicViewerApp final
         {
             draw.debug_arrow({
                 .origin = lights_.spot.position,
-                .vector = 0.65f * normalized_or(lights_.spot.direction, -k_axis_z),
+                .vector = 0.65f * normalize_or(lights_.spot.direction, -k_axis_z),
                 .color = lights_.spot.color,
                 .width = 0.018f,
             });
@@ -400,34 +398,34 @@ class BasicViewerApp final
 
     auto register_pick_targets() -> void
     {
-        picker_.add_sphere({
+        static_cast<void>(picker_.add_sphere({
             .object_id = object_ids_.sphere,
             .center = sphere_position_,
             .radius = sphere_radius_,
-        });
+        }));
 
         if (!hide_cube_)
         {
             const auto cube = cube_transform();
-            picker_.add_obb({
+            static_cast<void>(picker_.add_obb({
                 .object_id = object_ids_.cube,
                 .center = cube.translation,
                 .half_extent = 0.5f * glm::abs(cube.scale),
                 .rotation = cube.rotation,
-            });
+            }));
         }
         const auto column = column_transform();
-        picker_.add_obb({
+        static_cast<void>(picker_.add_obb({
             .object_id = object_ids_.column,
             .center = column.translation,
             .half_extent = 0.5f * glm::abs(column.scale),
             .rotation = column.rotation,
-        });
-        picker_.add_sphere({
+        }));
+        static_cast<void>(picker_.add_sphere({
             .object_id = object_ids_.small_sphere,
             .center = small_sphere_position_,
             .radius = 0.36f,
-        });
+        }));
     }
 
     auto handle_selection_click(const FrameContext& frame) -> void
@@ -488,16 +486,16 @@ class BasicViewerApp final
             {
                 ImGui::Text(
                     "Position: %.3f %.3f %.3f",
-                    static_cast<double>(sphere_position_.x),
-                    static_cast<double>(sphere_position_.y),
-                    static_cast<double>(sphere_position_.z)
+                    static_cast<f64>(sphere_position_.x),
+                    static_cast<f64>(sphere_position_.y),
+                    static_cast<f64>(sphere_position_.z)
                 );
-                ImGui::Text("Radius: %.3f", static_cast<double>(sphere_radius_));
+                ImGui::Text("Radius: %.3f", static_cast<f64>(sphere_radius_));
                 ImGui::Text("Mesh: %u slices, %u stacks", sphere_slices_, sphere_stacks_);
                 ImGui::Text(
                     "Material: metallic %.2f roughness %.2f",
-                    static_cast<double>(materials_.sphere.metallic),
-                    static_cast<double>(materials_.sphere.roughness)
+                    static_cast<f64>(materials_.sphere.metallic),
+                    static_cast<f64>(materials_.sphere.roughness)
                 );
             }
             else if (is_selected(object_ids_.cube))
@@ -505,15 +503,15 @@ class BasicViewerApp final
                 const auto cube = cube_transform();
                 ImGui::Text(
                     "Position: %.3f %.3f %.3f",
-                    static_cast<double>(cube.translation.x),
-                    static_cast<double>(cube.translation.y),
-                    static_cast<double>(cube.translation.z)
+                    static_cast<f64>(cube.translation.x),
+                    static_cast<f64>(cube.translation.y),
+                    static_cast<f64>(cube.translation.z)
                 );
                 ImGui::Text("Collider: OBB");
                 ImGui::Text(
                     "Material: metallic %.2f roughness %.2f",
-                    static_cast<double>(materials_.cube.metallic),
-                    static_cast<double>(materials_.cube.roughness)
+                    static_cast<f64>(materials_.cube.metallic),
+                    static_cast<f64>(materials_.cube.roughness)
                 );
             }
             else if (is_selected(object_ids_.column))
@@ -521,30 +519,30 @@ class BasicViewerApp final
                 const auto column = column_transform();
                 ImGui::Text(
                     "Position: %.3f %.3f %.3f",
-                    static_cast<double>(column.translation.x),
-                    static_cast<double>(column.translation.y),
-                    static_cast<double>(column.translation.z)
+                    static_cast<f64>(column.translation.x),
+                    static_cast<f64>(column.translation.y),
+                    static_cast<f64>(column.translation.z)
                 );
                 ImGui::Text("Mask: camera + shadow producer + receiver");
                 ImGui::Text(
                     "Material: metallic %.2f roughness %.2f",
-                    static_cast<double>(materials_.column.metallic),
-                    static_cast<double>(materials_.column.roughness)
+                    static_cast<f64>(materials_.column.metallic),
+                    static_cast<f64>(materials_.column.roughness)
                 );
             }
             else if (is_selected(object_ids_.small_sphere))
             {
                 ImGui::Text(
                     "Position: %.3f %.3f %.3f",
-                    static_cast<double>(small_sphere_position_.x),
-                    static_cast<double>(small_sphere_position_.y),
-                    static_cast<double>(small_sphere_position_.z)
+                    static_cast<f64>(small_sphere_position_.x),
+                    static_cast<f64>(small_sphere_position_.y),
+                    static_cast<f64>(small_sphere_position_.z)
                 );
                 ImGui::Text("Mask: camera + shadow producer + receiver");
                 ImGui::Text(
                     "Material: metallic %.2f roughness %.2f",
-                    static_cast<double>(materials_.small_sphere.metallic),
-                    static_cast<double>(materials_.small_sphere.roughness)
+                    static_cast<f64>(materials_.small_sphere.metallic),
+                    static_cast<f64>(materials_.small_sphere.roughness)
                 );
             }
             if (ImGui::Button("Clear selection"))
@@ -573,8 +571,7 @@ class BasicViewerApp final
                 const auto radius_squared = xf * xf + yf * yf;
                 const auto lift = 0.30f + 0.16f * std::sin(1.4f * xf) * std::cos(1.2f * yf);
                 const auto tangent = Vec3{-yf, xf, 0.38f * std::cos(0.7f * radius_squared)};
-                const auto direction =
-                    glm::dot(tangent, tangent) > 1.0e-8f ? glm::normalize(tangent) : k_axis_z;
+                const auto direction = normalize_or(tangent, k_axis_z);
                 const auto strength = 0.35f + 0.58f * std::exp(-0.16f * radius_squared);
                 vector_field_positions_.emplace_back(xf, yf, lift);
                 vector_field_vectors_.push_back(strength * direction);
@@ -703,10 +700,10 @@ class BasicViewerApp final
     struct DebugAxisConfig
     {
         f32 arrow_length{1.4f};
-        Vec3 pos{0.0f, 0.0f, 0.04f};
-        Color color_x{0.96f, 0.18f, 0.14f, 1.0f};
-        Color color_y{0.20f, 0.78f, 0.24f, 1.0f};
-        Color color_z{0.20f, 0.42f, 1.00f, 1.0f};
+        Vec3 origin{0.0f, 0.0f, 0.04f};
+        Color x_color{0.96f, 0.18f, 0.14f, 1.0f};
+        Color y_color{0.20f, 0.78f, 0.24f, 1.0f};
+        Color z_color{0.20f, 0.42f, 1.00f, 1.0f};
     };
     DebugAxisConfig debug_axis_cfg_{};
 

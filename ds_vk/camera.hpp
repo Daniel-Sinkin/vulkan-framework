@@ -4,7 +4,7 @@
 
 namespace ds_vk
 {
-enum class ProjectionMode : u32
+enum class ProjectionMode : u8
 {
     perspective = 0,
     orthographic = 1,
@@ -25,21 +25,33 @@ struct CameraConfig
     ProjectionMode projection_mode{ProjectionMode::perspective};
 };
 
-struct Camera
+class Camera
 {
-    Vec3 pivot{0.0f, 0.0f, 0.5f};
-    f32 distance{5.0f};
-    f32 yaw{glm::radians(45.0f)};
-    f32 pitch{glm::radians(24.0f)};
-    f32 fov_y{glm::radians(55.0f)};
-    f32 orbit_sensitivity{1.0f};
-    f32 pivot_sensitivity{1.0f};
-    f32 zoom_sensitivity{1.0f};
-    f32 z_near{0.02f};
-    f32 z_far{200.0f};
-    ProjectionMode projection_mode{ProjectionMode::perspective};
-
+  public:
     auto configure(const CameraConfig& config) noexcept -> Camera&;
+
+    [[nodiscard]] auto pivot() noexcept -> Vec3&;
+    [[nodiscard]] auto pivot() const noexcept -> const Vec3&;
+    [[nodiscard]] auto distance() noexcept -> f32&;
+    [[nodiscard]] auto distance() const noexcept -> f32;
+    [[nodiscard]] auto yaw() noexcept -> f32&;
+    [[nodiscard]] auto yaw() const noexcept -> f32;
+    [[nodiscard]] auto pitch() noexcept -> f32&;
+    [[nodiscard]] auto pitch() const noexcept -> f32;
+    [[nodiscard]] auto fov_y() noexcept -> f32&;
+    [[nodiscard]] auto fov_y() const noexcept -> f32;
+    [[nodiscard]] auto orbit_sensitivity() noexcept -> f32&;
+    [[nodiscard]] auto orbit_sensitivity() const noexcept -> f32;
+    [[nodiscard]] auto pivot_sensitivity() noexcept -> f32&;
+    [[nodiscard]] auto pivot_sensitivity() const noexcept -> f32;
+    [[nodiscard]] auto zoom_sensitivity() noexcept -> f32&;
+    [[nodiscard]] auto zoom_sensitivity() const noexcept -> f32;
+    [[nodiscard]] auto z_near() noexcept -> f32&;
+    [[nodiscard]] auto z_near() const noexcept -> f32;
+    [[nodiscard]] auto z_far() noexcept -> f32&;
+    [[nodiscard]] auto z_far() const noexcept -> f32;
+    [[nodiscard]] auto projection_mode() noexcept -> ProjectionMode&;
+    [[nodiscard]] auto projection_mode() const noexcept -> ProjectionMode;
 
     [[nodiscard]] auto position() const noexcept -> Vec3;
     [[nodiscard]] auto view_matrix() const noexcept -> Mat4;
@@ -51,5 +63,18 @@ struct Camera
     [[nodiscard]] auto units_per_pixel_y(f32 viewport_height_px) const noexcept -> f32;
     [[nodiscard]] auto pan_offset_world(f32 dx_px, f32 dy_px, f32 viewport_height_px) const noexcept
         -> Vec3;
+
+  private:
+    Vec3 pivot_{0.0f, 0.0f, 0.5f};
+    f32 distance_{5.0f};
+    f32 yaw_{glm::radians(45.0f)};
+    f32 pitch_{glm::radians(24.0f)};
+    f32 fov_y_{glm::radians(55.0f)};
+    f32 orbit_sensitivity_{1.0f};
+    f32 pivot_sensitivity_{1.0f};
+    f32 zoom_sensitivity_{1.0f};
+    f32 z_near_{0.02f};
+    f32 z_far_{200.0f};
+    ProjectionMode projection_mode_{ProjectionMode::perspective};
 };
 }  // namespace ds_vk

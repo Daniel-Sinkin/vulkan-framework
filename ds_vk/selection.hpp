@@ -26,7 +26,7 @@ struct PickAabb
     Vec3 max{};
 };
 
-enum class PickShapeType : u32
+enum class PickShapeType : u8
 {
     sphere = 0,
     aabb = 1,

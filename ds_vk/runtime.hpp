@@ -1,11 +1,12 @@
 #pragma once
 
 #include "ds_vk/camera.hpp"
+#include "ds_vk/debug_draw.hpp"
 #include "ds_vk/mesh.hpp"
+#include "ds_vk/types.hpp"
 
 #include <concepts>
 #include <filesystem>
-#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,25 +15,6 @@
 
 namespace ds_vk
 {
-struct MeshHandle
-{
-    u32 index{std::numeric_limits<u32>::max()};
-
-    [[nodiscard]] auto valid() const noexcept -> bool
-    {
-        return index != std::numeric_limits<u32>::max();
-    }
-};
-
-struct TextureHandle
-{
-    u32 index{std::numeric_limits<u32>::max()};
-
-    [[nodiscard]] auto valid() const noexcept -> bool
-    {
-        return index != std::numeric_limits<u32>::max();
-    }
-};
 
 struct DescriptorIndexingSupport
 {
@@ -182,40 +164,6 @@ struct SpotLightConfig
     bool enabled{true};
 };
 
-struct DebugLineConfig
-{
-    Vec3 start{};
-    Vec3 end{};
-    Color color{Color::white};
-    f32 width{0.012f};
-};
-
-struct DebugArrowConfig
-{
-    Vec3 origin{};
-    Vec3 vector{};
-    Color color{Color::white};
-    f32 width{0.016f};
-};
-
-struct DebugSphereConfig
-{
-    Vec3 center{};
-    f32 radius{1.0f};
-    Color color{Color::white};
-    u32 segments{32u};
-    f32 width{0.010f};
-};
-
-struct DebugSegment
-{
-    Vec3 start{};
-    f32 width{0.012f};
-    Vec3 end{};
-    f32 arrow_tip{};
-    Color color{Color::white};
-};
-
 class DrawList
 {
   public:
@@ -223,16 +171,9 @@ class DrawList
     auto set_ambient_light(Color color) -> void;
     auto draw_mesh(const MeshDrawConfig& config) -> void;
     auto draw_basic_mesh(const BasicMeshDrawConfig& config) -> void;
-    auto draw_basic_mesh(
-        MeshHandle mesh, const Transform& transform = Transform{}, Color color = Color::white
-    ) -> void;
     auto debug_line(const DebugLineConfig& config) -> void;
-    auto debug_line(Vec3 start, Vec3 end, Color color, f32 width = 0.012f) -> void;
     auto debug_arrow(const DebugArrowConfig& config) -> void;
-    auto debug_arrow(Vec3 origin, Vec3 vector, Color color, f32 width = 0.016f) -> void;
     auto debug_sphere(const DebugSphereConfig& config) -> void;
-    auto debug_sphere(Vec3 center, f32 radius, Color color, u32 segments = 32u, f32 width = 0.010f)
-        -> void;
     auto add_light(const LightConfig& config) -> void;
     auto directional_light(const DirectionalLightConfig& config) -> void;
     auto radial_light(const RadialLightConfig& config) -> void;
@@ -379,6 +320,7 @@ class Runtime
     auto operator=(Runtime&&) noexcept -> Runtime&;
 
     template <typename App>
+    [[nodiscard]]
     auto run(App& app) -> int
     {
         static_assert(
@@ -396,7 +338,7 @@ class Runtime
                     static_cast<App*>(user)->setup(runtime);
                 }
             },
-            .update = [](void* user, FrameContext& frame, const f32 dt_seconds) -> void
+            .update = [](void* user, FrameContext& frame, f32 dt_seconds) -> void
             {
                 if constexpr (detail::has_update<App>)
                 {
@@ -421,9 +363,10 @@ class Runtime
         return run_callbacks(callbacks);
     }
 
-    auto upload_mesh(const MeshData& mesh) -> MeshHandle;
-    auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
-    auto load_texture(const std::filesystem::path& path, const TextureLoadConfig& config = {})
+    [[nodiscard]] auto upload_mesh(const MeshData& mesh) -> MeshHandle;
+    [[nodiscard]] auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
+    [[nodiscard]] auto
+    load_texture(const std::filesystem::path& path, const TextureLoadConfig& config = {})
         -> TextureHandle;
     auto request_screenshot(std::filesystem::path path, bool transparent = false) -> void;
 

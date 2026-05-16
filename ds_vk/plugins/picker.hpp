@@ -22,7 +22,7 @@ struct PickTargetId
     }
 };
 
-enum class PickerShapeType : u32
+enum class PickerShapeType : u8
 {
     sphere = 0,
     aabb = 1,
@@ -130,11 +130,11 @@ class Picker
   public:
     auto clear() -> void;
 
-    auto add_sphere(const PickerSphereConfig& config) -> PickTargetId;
-    auto add_aabb(const PickerAabbConfig& config) -> PickTargetId;
-    auto add_obb(const PickerObbConfig& config) -> PickTargetId;
-    auto add_capsule(const PickerCapsuleConfig& config) -> PickTargetId;
-    auto add_screen_segment(const PickerScreenSegmentConfig& config) -> PickTargetId;
+    [[nodiscard]] auto add_sphere(const PickerSphereConfig& config) -> PickTargetId;
+    [[nodiscard]] auto add_aabb(const PickerAabbConfig& config) -> PickTargetId;
+    [[nodiscard]] auto add_obb(const PickerObbConfig& config) -> PickTargetId;
+    [[nodiscard]] auto add_capsule(const PickerCapsuleConfig& config) -> PickTargetId;
+    [[nodiscard]] auto add_screen_segment(const PickerScreenSegmentConfig& config) -> PickTargetId;
 
     [[nodiscard]] auto raycast(const PickerRaycastConfig& config) const -> std::optional<PickerHit>;
     [[nodiscard]] auto raycast(const PickRay& ray) const -> std::optional<PickerHit>;
@@ -155,7 +155,7 @@ class Picker
         PickerScreenSegmentConfig screen_segment{};
     };
 
-    auto add_target(Target target) -> PickTargetId;
+    [[nodiscard]] auto add_target(Target target) -> PickTargetId;
 
     std::vector<Target> targets_{};
     u32 next_target_id_{};

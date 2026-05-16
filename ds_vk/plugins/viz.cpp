@@ -13,19 +13,19 @@ struct ColorStop
     Color color;
 };
 
-[[nodiscard]] auto saturate(const f32 value) noexcept -> f32
+[[nodiscard]] auto saturate(f32 value) noexcept -> f32
 {
     return std::clamp(value, 0.0f, 1.0f);
 }
 
-[[nodiscard]] auto saturate_color(const Color color) noexcept -> Color
+[[nodiscard]] auto saturate_color(Color color) noexcept -> Color
 {
     return Color{
         saturate(color.r()), saturate(color.g()), saturate(color.b()), saturate(color.a())
     };
 }
 
-[[nodiscard]] auto sample_stops(std::span<const ColorStop> stops, const f32 t_in) noexcept -> Color
+[[nodiscard]] auto sample_stops(std::span<const ColorStop> stops, f32 t_in) noexcept -> Color
 {
     if (stops.empty())
     {
@@ -42,12 +42,12 @@ struct ColorStop
         return saturate_color(stops.back().color);
     }
 
-    for (auto i = usize{1u}; i < stops.size(); ++i)
+    for (auto i = 1zu; i < stops.size(); ++i)
     {
         const auto& right = stops[i];
         if (t <= right.t)
         {
-            const auto& left = stops[i - 1u];
+            const auto& left = stops[i - 1zu];
             const auto denom = std::max(1.0e-6f, right.t - left.t);
             const auto local_t = (t - left.t) / denom;
             return saturate_color(mix_color(left.color, right.color, local_t));
@@ -56,7 +56,7 @@ struct ColorStop
     return saturate_color(stops.back().color);
 }
 
-[[nodiscard]] auto grayscale(const f32 t) noexcept -> Color
+[[nodiscard]] auto grayscale(f32 t) noexcept -> Color
 {
     const auto v = saturate(t);
     return Color{v, v, v, 1.0f};
@@ -73,7 +73,7 @@ auto ColorRamp::configure(const ColorRampConfig& config) noexcept -> ColorRamp&
     return *this;
 }
 
-auto ColorRamp::sample(const f32 value) const noexcept -> Color
+auto ColorRamp::sample(f32 value) const noexcept -> Color
 {
     if (!std::isfinite(value))
     {
@@ -82,7 +82,7 @@ auto ColorRamp::sample(const f32 value) const noexcept -> Color
     return sample_color(config_.preset, normalized_value(value));
 }
 
-auto ColorRamp::normalized_value(const f32 value) const noexcept -> f32
+auto ColorRamp::normalized_value(f32 value) const noexcept -> f32
 {
     const auto denom = config_.range.max - config_.range.min;
     if (!std::isfinite(value))
@@ -103,7 +103,7 @@ auto ColorRamp::config() const noexcept -> const ColorRampConfig&
     return config_;
 }
 
-auto sample_color(const ColorPreset preset, const f32 normalized_value) noexcept -> Color
+auto sample_color(ColorPreset preset, f32 normalized_value) noexcept -> Color
 {
     if (preset == ColorPreset::grayscale)
     {
