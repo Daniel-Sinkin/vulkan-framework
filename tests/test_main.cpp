@@ -1,3 +1,4 @@
+#include "ds_vk/assets.hpp"
 #include "ds_vk/camera.hpp"
 #include "ds_vk/geometry.hpp"
 #include "ds_vk/mesh.hpp"
@@ -6,14 +7,23 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <exception>
+#include <filesystem>
+#include <fstream>
 #include <glm/gtc/constants.hpp>
 #include <iostream>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace
 {
 auto g_failures = 0;
+
+#ifndef DS_VK_TEST_ASSET_DIR
+#    define DS_VK_TEST_ASSET_DIR "assets"
+#endif
 
 auto check(const bool condition, const std::string_view message) -> void
 {
@@ -31,12 +41,113 @@ auto near(const ds_vk::f32 a, const ds_vk::f32 b, const ds_vk::f32 eps = 1.0e-5f
 
 auto finite_vec3(const ds_vk::Vec3 value) -> bool
 {
-    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    return std::isfinite(value.x) and std::isfinite(value.y) and std::isfinite(value.z);
 }
 
 auto finite_vec2(const ds_vk::Vec2 value) -> bool
 {
-    return std::isfinite(value.x) && std::isfinite(value.y);
+    return std::isfinite(value.x) and std::isfinite(value.y);
+}
+
+template <typename T>
+auto append_pod(std::vector<ds_vk::u8>& bytes, T value) -> void
+{
+    const auto offset = bytes.size();
+    bytes.resize(offset + sizeof(T));
+    std::memcpy(bytes.data() + offset, &value, sizeof(T));
+}
+
+auto append_bytes(std::vector<ds_vk::u8>& bytes, std::span<const ds_vk::u8> data) -> void
+{
+    bytes.insert(bytes.end(), data.begin(), data.end());
+}
+
+auto pad_to_glb_alignment(std::vector<ds_vk::u8>& bytes, ds_vk::u8 pad) -> void
+{
+    while ((bytes.size() % 4zu) != 0zu)
+    {
+        bytes.push_back(pad);
+    }
+}
+
+[[nodiscard]] auto make_triangle_glb_with_unknown_chunk() -> std::vector<ds_vk::u8>
+{
+    constexpr auto k_glb_magic = ds_vk::u32{0x46546c67u};
+    constexpr auto k_glb_version_2 = ds_vk::u32{2u};
+    constexpr auto k_glb_json_chunk_type = ds_vk::u32{0x4e4f534au};
+    constexpr auto k_glb_binary_chunk_type = ds_vk::u32{0x004e4942u};
+    constexpr auto k_unknown_chunk_type = ds_vk::u32{0x54534554u};
+    constexpr auto k_binary_byte_length = ds_vk::usize{102zu};
+
+    auto bin = std::vector<ds_vk::u8>{};
+    bin.reserve(k_binary_byte_length);
+    const auto append_vec3 = [&](ds_vk::Vec3 value) -> void
+    {
+        append_pod(bin, value.x);
+        append_pod(bin, value.y);
+        append_pod(bin, value.z);
+    };
+    const auto append_vec2 = [&](ds_vk::Vec2 value) -> void
+    {
+        append_pod(bin, value.x);
+        append_pod(bin, value.y);
+    };
+    append_vec3({0.0f, 0.0f, 0.0f});
+    append_vec3({1.0f, 0.0f, 0.0f});
+    append_vec3({0.0f, 1.0f, 0.0f});
+    append_vec3(ds_vk::k_axis_z);
+    append_vec3(ds_vk::k_axis_z);
+    append_vec3(ds_vk::k_axis_z);
+    append_vec2({0.0f, 0.0f});
+    append_vec2({1.0f, 0.0f});
+    append_vec2({0.0f, 1.0f});
+    append_pod(bin, ds_vk::u16{0u});
+    append_pod(bin, ds_vk::u16{1u});
+    append_pod(bin, ds_vk::u16{2u});
+    check(bin.size() == k_binary_byte_length, "glb fixture binary layout");
+    pad_to_glb_alignment(bin, ds_vk::u8{0u});
+
+    auto json_chunk = std::vector<ds_vk::u8>{};
+    constexpr auto json_text = std::string_view{
+        R"({"asset":{"version":"2.0"},"buffers":[{"byteLength":102}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":36},{"buffer":0,"byteOffset":72,"byteLength":24},{"buffer":0,"byteOffset":96,"byteLength":6}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},{"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"mode":4}]}]})"
+    };
+    json_chunk.assign(json_text.begin(), json_text.end());
+    pad_to_glb_alignment(json_chunk, ds_vk::u8{' '});
+
+    auto unknown_chunk = std::vector<ds_vk::u8>{7u, 5u, 3u, 1u};
+    pad_to_glb_alignment(unknown_chunk, ds_vk::u8{0u});
+
+    constexpr auto k_glb_header_bytes = ds_vk::usize{12zu};
+    constexpr auto k_glb_chunk_header_bytes = ds_vk::usize{8zu};
+    const auto total_length = k_glb_header_bytes + 3zu * k_glb_chunk_header_bytes
+                              + json_chunk.size() + bin.size() + unknown_chunk.size();
+
+    auto glb = std::vector<ds_vk::u8>{};
+    append_pod(glb, k_glb_magic);
+    append_pod(glb, k_glb_version_2);
+    append_pod(glb, static_cast<ds_vk::u32>(total_length));
+    append_pod(glb, static_cast<ds_vk::u32>(json_chunk.size()));
+    append_pod(glb, k_glb_json_chunk_type);
+    append_bytes(glb, json_chunk);
+    append_pod(glb, static_cast<ds_vk::u32>(bin.size()));
+    append_pod(glb, k_glb_binary_chunk_type);
+    append_bytes(glb, bin);
+    append_pod(glb, static_cast<ds_vk::u32>(unknown_chunk.size()));
+    append_pod(glb, k_unknown_chunk_type);
+    append_bytes(glb, unknown_chunk);
+    return glb;
+}
+
+auto replace_first_glb_chunk_type(std::vector<ds_vk::u8>& glb, ds_vk::u32 chunk_type) -> void
+{
+    constexpr auto k_glb_first_chunk_type_offset = 16zu;
+    std::memcpy(glb.data() + k_glb_first_chunk_type_offset, &chunk_type, sizeof(chunk_type));
+}
+
+auto set_glb_container_length(std::vector<ds_vk::u8>& glb, ds_vk::u32 byte_count) -> void
+{
+    constexpr auto k_glb_length_offset = 8zu;
+    std::memcpy(glb.data() + k_glb_length_offset, &byte_count, sizeof(byte_count));
 }
 
 struct FakeDrawSink
@@ -106,9 +217,9 @@ auto test_quad_mesh() -> void
     check(near(mesh.vertices[0].texcoord.x, 0.0f), "quad has uvs");
     check(near(mesh.vertices[2].texcoord.y, 1.0f), "quad uv max y");
     const auto aabb = ds_vk::aabb_of(mesh);
-    check(near(aabb.min.x, -1.0f) && near(aabb.max.x, 1.0f), "quad x bounds");
-    check(near(aabb.min.y, -1.0f) && near(aabb.max.y, 1.0f), "quad y bounds");
-    check(near(aabb.min.z, 0.0f) && near(aabb.max.z, 0.0f), "quad lies on z=0");
+    check(near(aabb.min.x, -1.0f) and near(aabb.max.x, 1.0f), "quad x bounds");
+    check(near(aabb.min.y, -1.0f) and near(aabb.max.y, 1.0f), "quad y bounds");
+    check(near(aabb.min.z, 0.0f) and near(aabb.max.z, 0.0f), "quad lies on z=0");
 }
 
 auto test_cube_mesh() -> void
@@ -121,8 +232,8 @@ auto test_cube_mesh() -> void
     {
         check(near(glm::length(vertex.normal), 1.0f), "cube normals are unit length");
         check(finite_vec2(vertex.texcoord), "cube uvs are finite");
-        check(vertex.texcoord.x >= 0.0f && vertex.texcoord.x <= 1.0f, "cube uv x is normalized");
-        check(vertex.texcoord.y >= 0.0f && vertex.texcoord.y <= 1.0f, "cube uv y is normalized");
+        check(vertex.texcoord.x >= 0.0f and vertex.texcoord.x <= 1.0f, "cube uv x is normalized");
+        check(vertex.texcoord.y >= 0.0f and vertex.texcoord.y <= 1.0f, "cube uv y is normalized");
     }
 }
 
@@ -149,8 +260,8 @@ auto test_sphere_mesh() -> void
         check(finite_vec3(vertex.position), "sphere positions are finite");
         check(finite_vec3(vertex.normal), "sphere normals are finite");
         check(finite_vec2(vertex.texcoord), "sphere uvs are finite");
-        check(vertex.texcoord.x >= 0.0f && vertex.texcoord.x <= 1.0f, "sphere uv x is normalized");
-        check(vertex.texcoord.y >= 0.0f && vertex.texcoord.y <= 1.0f, "sphere uv y is normalized");
+        check(vertex.texcoord.x >= 0.0f and vertex.texcoord.x <= 1.0f, "sphere uv x is normalized");
+        check(vertex.texcoord.y >= 0.0f and vertex.texcoord.y <= 1.0f, "sphere uv y is normalized");
         check(near(glm::length(vertex.normal), 1.0f, 1.0e-4f), "sphere normals are unit length");
         check(near(glm::length(vertex.position), 2.0f, 1.0e-4f), "sphere radius is respected");
         check(
@@ -158,7 +269,7 @@ auto test_sphere_mesh() -> void
             "sphere normals are radial"
         );
     }
-    for (auto i = ds_vk::usize{0}; i + 2u < mesh.indices.size(); i += 3u)
+    for (auto i = 0zu; i + 2u < mesh.indices.size(); i += 3u)
     {
         const auto a = mesh.vertices[mesh.indices[i + 0u]].position;
         const auto b = mesh.vertices[mesh.indices[i + 1u]].position;
@@ -173,6 +284,90 @@ auto test_sphere_mesh() -> void
             );
         }
     }
+}
+
+auto test_gltf_assets() -> void
+{
+    const auto mesh = ds_vk::load_gltf_mesh(
+        std::filesystem::path{DS_VK_TEST_ASSET_DIR} / "test/triangle.gltf",
+        ds_vk::GltfMeshLoadConfig{.color = ds_vk::Color::cyan}
+    );
+    check(mesh.vertices.size() == 3zu, "gltf loader reads vertex count");
+    check(mesh.indices.size() == 3zu, "gltf loader reads index count");
+    check(ds_vk::has_valid_indices(mesh), "gltf loader reads valid indices");
+    check(near(mesh.vertices[1].position.x, 1.0f), "gltf loader reads positions");
+    check(near(mesh.vertices[2].texcoord.y, 1.0f), "gltf loader reads texcoords");
+    check(near(glm::length(mesh.vertices[0].normal), 1.0f), "gltf loader reads normals");
+    check(near(mesh.vertices[0].color.g(), 1.0f), "gltf loader applies mesh color");
+
+    const auto generated_normal_mesh = ds_vk::load_gltf_mesh(
+        std::filesystem::path{DS_VK_TEST_ASSET_DIR} / "test/triangle_no_normals.gltf"
+    );
+    check(generated_normal_mesh.vertices.size() == 3zu, "gltf loader reads missing-normal mesh");
+    for (const auto& vertex : generated_normal_mesh.vertices)
+    {
+        check(near(glm::length(vertex.normal), 1.0f), "gltf loader generates unit normals");
+        check(vertex.normal.z > 0.99f, "gltf loader generated normal points along +z");
+    }
+
+    const auto glb_path = std::filesystem::temp_directory_path() / "ds_vk_unknown_chunk_test.glb";
+    {
+        auto out = std::ofstream{glb_path, std::ios::binary};
+        const auto glb_bytes = make_triangle_glb_with_unknown_chunk();
+        out.write(
+            reinterpret_cast<const char*>(glb_bytes.data()),
+            static_cast<std::streamsize>(glb_bytes.size())
+        );
+    }
+    const auto glb_mesh = ds_vk::load_gltf_mesh(glb_path);
+    check(glb_mesh.vertices.size() == 3zu, "glb loader reads vertex count");
+    check(glb_mesh.indices.size() == 3zu, "glb loader reads index count");
+    check(near(glb_mesh.vertices[2].texcoord.y, 1.0f), "glb loader ignores unknown chunks");
+
+    {
+        auto invalid_glb_bytes = make_triangle_glb_with_unknown_chunk();
+        replace_first_glb_chunk_type(invalid_glb_bytes, 0x54534554u);
+        auto out = std::ofstream{glb_path, std::ios::binary};
+        out.write(
+            reinterpret_cast<const char*>(invalid_glb_bytes.data()),
+            static_cast<std::streamsize>(invalid_glb_bytes.size())
+        );
+    }
+    auto rejected_non_json_first_chunk = false;
+    try
+    {
+        (void) ds_vk::load_gltf_mesh(glb_path);
+    }
+    catch (const std::runtime_error&)
+    {
+        rejected_non_json_first_chunk = true;
+    }
+    check(rejected_non_json_first_chunk, "glb loader requires JSON as first chunk");
+
+    {
+        auto invalid_glb_bytes = make_triangle_glb_with_unknown_chunk();
+        constexpr auto k_partial_chunk_header = ds_vk::u32{0x12345678u};
+        append_pod(invalid_glb_bytes, k_partial_chunk_header);
+        set_glb_container_length(
+            invalid_glb_bytes, static_cast<ds_vk::u32>(invalid_glb_bytes.size())
+        );
+        auto out = std::ofstream{glb_path, std::ios::binary};
+        out.write(
+            reinterpret_cast<const char*>(invalid_glb_bytes.data()),
+            static_cast<std::streamsize>(invalid_glb_bytes.size())
+        );
+    }
+    auto rejected_truncated_chunk_header = false;
+    try
+    {
+        (void) ds_vk::load_gltf_mesh(glb_path);
+    }
+    catch (const std::runtime_error&)
+    {
+        rejected_truncated_chunk_header = true;
+    }
+    check(rejected_truncated_chunk_header, "glb loader rejects truncated chunk header");
+    std::filesystem::remove(glb_path);
 }
 
 auto test_camera_projection() -> void
@@ -224,7 +419,7 @@ auto test_geometry_helpers() -> void
             .radius = 1.0f,
         }
     );
-    check(sphere_hit.has_value() && near(*sphere_hit, 2.0f), "pick ray intersects sphere");
+    check(sphere_hit.has_value() and near(*sphere_hit, 2.0f), "pick ray intersects sphere");
 
     const auto sphere_miss = ds_vk::intersect_sphere(
         ray,
@@ -242,7 +437,7 @@ auto test_geometry_helpers() -> void
             .max = {5.0f, 1.0f, 1.0f},
         }
     );
-    check(aabb_hit.has_value() && near(*aabb_hit, 4.0f), "pick ray intersects aabb");
+    check(aabb_hit.has_value() and near(*aabb_hit, 4.0f), "pick ray intersects aabb");
 
     const auto reversed_aabb_hit = ds_vk::intersect_aabb(
         ray,
@@ -252,7 +447,7 @@ auto test_geometry_helpers() -> void
         }
     );
     check(
-        reversed_aabb_hit.has_value() && near(*reversed_aabb_hit, 4.0f),
+        reversed_aabb_hit.has_value() and near(*reversed_aabb_hit, 4.0f),
         "pick ray normalizes reversed aabb bounds"
     );
 
@@ -260,7 +455,7 @@ auto test_geometry_helpers() -> void
         ds_vk::Ray{.origin = {0.0f, 0.0f, 0.0f}, .direction = ds_vk::k_axis_y},
         ds_vk::Obb{.center = {0.0f, 3.0f, 0.0f}, .half_extent = {0.5f, 0.5f, 0.5f}}
     );
-    check(obb_hit.has_value() && near(obb_hit->distance, 2.5f), "ray hits obb");
+    check(obb_hit.has_value() and near(obb_hit->distance, 2.5f), "ray hits obb");
 
     const auto capsule_hit = ds_vk::hit_capsule(
         ds_vk::Ray{.origin = {-2.0f, 0.0f, 0.0f}, .direction = ds_vk::k_axis_x},
@@ -294,14 +489,14 @@ auto test_picker_plugin() -> void
     auto picker = ds_vk::Picker{};
     const auto sphere_id = ds_vk::ObjectId{.value = 11u};
     const auto aabb_id = ds_vk::ObjectId{.value = 12u};
-    static_cast<void>(picker.add_sphere({
+    (void) picker.add_sphere({
         .object_id = sphere_id,
         .sphere = {.center = {3.0f, 0.0f, 0.0f}, .radius = 1.0f},
-    }));
-    static_cast<void>(picker.add_aabb({
+    });
+    (void) picker.add_aabb({
         .object_id = aabb_id,
         .aabb = {.min = {5.0f, -1.0f, -1.0f}, .max = {6.0f, 1.0f, 1.0f}},
-    }));
+    });
     const auto ray = ds_vk::Ray{
         .origin = {0.0f, 0.0f, 0.0f},
         .direction = ds_vk::k_axis_x,
@@ -315,11 +510,11 @@ auto test_picker_plugin() -> void
     }
 
     picker.clear();
-    static_cast<void>(picker.add_sphere({
+    (void) picker.add_sphere({
         .object_id = {.value = 20u},
         .layer = ds_vk::Layer{1u << 2u},
         .sphere = {.center = {2.0f, 0.0f, 0.0f}, .radius = 0.5f},
-    }));
+    });
     check(
         !picker.raycast({.ray = ray, .layer_mask = ds_vk::LayerMask{1u << 1u}}).has_value(),
         "picker raycast respects layer mask misses"
@@ -330,27 +525,27 @@ auto test_picker_plugin() -> void
     );
 
     picker.clear();
-    static_cast<void>(picker.add_obb({
+    (void) picker.add_obb({
         .object_id = {.value = 30u},
         .obb = {.center = {0.0f, 3.0f, 0.0f}, .half_extent = {0.5f, 0.5f, 0.5f}},
-    }));
+    });
     const auto obb_hit = picker.raycast({
         .origin = {0.0f, 0.0f, 0.0f},
         .direction = ds_vk::k_axis_y,
     });
-    check(obb_hit.has_value() && obb_hit->object_id.value == 30u, "picker supports obb targets");
+    check(obb_hit.has_value() and obb_hit->object_id.value == 30u, "picker supports obb targets");
 
     picker.clear();
-    static_cast<void>(picker.add_capsule({
+    (void) picker.add_capsule({
         .object_id = {.value = 40u},
         .capsule = {.a = -ds_vk::k_axis_z, .b = ds_vk::k_axis_z, .radius = 0.25f},
-    }));
+    });
     const auto capsule_hit = picker.raycast({
         .origin = {-2.0f, 0.0f, 0.0f},
         .direction = ds_vk::k_axis_x,
     });
     check(
-        capsule_hit.has_value() && capsule_hit->object_id.value == 40u,
+        capsule_hit.has_value() and capsule_hit->object_id.value == 40u,
         "picker supports capsule targets"
     );
 
@@ -362,32 +557,32 @@ auto test_picker_plugin() -> void
         .pitch = 0.0f,
     });
     picker.clear();
-    static_cast<void>(picker.add_sphere({
+    (void) picker.add_sphere({
         .object_id = {.value = 50u},
         .sphere = {.center = {0.0f, 0.0f, 0.0f}, .radius = 1.0f},
-    }));
+    });
     const auto click_hit = picker.click({
         .camera = camera,
         .mouse_px = {400.0f, 300.0f},
         .viewport_px = {800.0f, 600.0f},
     });
     check(
-        click_hit.has_value() && click_hit->object_id.value == 50u, "picker click uses camera ray"
+        click_hit.has_value() and click_hit->object_id.value == 50u, "picker click uses camera ray"
     );
 
     picker.clear();
-    static_cast<void>(picker.add_screen_segment({
+    (void) picker.add_screen_segment({
         .object_id = {.value = 60u},
         .segment = {.start = {0.0f, -0.5f, 0.0f}, .end = {0.0f, 0.5f, 0.0f}},
         .radius_px = 12.0f,
-    }));
+    });
     const auto segment_hit = picker.click({
         .camera = camera,
         .mouse_px = {400.0f, 300.0f},
         .viewport_px = {800.0f, 600.0f},
     });
     check(
-        segment_hit.has_value() && segment_hit->object_id.value == 60u,
+        segment_hit.has_value() and segment_hit->object_id.value == 60u,
         "picker click supports screen segment targets"
     );
 
@@ -397,18 +592,18 @@ auto test_picker_plugin() -> void
     const auto above_center_px =
         ds_vk::Vec2{(clip.x * 0.5f + 0.5f) * 800.0f, (clip.y * 0.5f + 0.5f) * 600.0f};
     picker.clear();
-    static_cast<void>(picker.add_screen_segment({
+    (void) picker.add_screen_segment({
         .object_id = {.value = 61u},
         .segment = {.start = {0.0f, -0.2f, 1.0f}, .end = {0.0f, 0.2f, 1.0f}},
         .radius_px = 8.0f,
-    }));
+    });
     const auto above_segment_hit = picker.click({
         .camera = camera,
         .mouse_px = above_center_px,
         .viewport_px = {800.0f, 600.0f},
     });
     check(
-        above_segment_hit.has_value() && above_segment_hit->object_id.value == 61u,
+        above_segment_hit.has_value() and above_segment_hit->object_id.value == 61u,
         "picker screen segment projection uses Vulkan framebuffer y convention"
     );
 }
@@ -429,7 +624,7 @@ auto test_viz_plugin() -> void
 
     const auto values = std::array{3.0f, -1.0f, 9.0f};
     const auto range = ds_vk::viz::range_from_values(values);
-    check(near(range.min, -1.0f) && near(range.max, 9.0f), "viz range scans values");
+    check(near(range.min, -1.0f) and near(range.max, 9.0f), "viz range scans values");
 
     auto camera = ds_vk::Camera{};
     camera.configure({
@@ -457,7 +652,7 @@ auto test_viz_plugin() -> void
             .max_vectors = 1zu,
         }
     );
-    check(arrows == 1u && draw.arrow_count == 1u, "viz vector field respects max_vectors");
+    check(arrows == 1u and draw.arrow_count == 1u, "viz vector field respects max_vectors");
     check(near(draw.last_arrow_vector.y, 0.5f), "viz vector field scales vectors");
 
     const auto cross_lines = ds_vk::viz::draw_cross_marker(
@@ -485,23 +680,47 @@ auto test_viz_plugin() -> void
             .head_alpha = 0.85f,
         }
     );
-    check(trail_segments == 2u && trail_draw.line_count == 2u, "viz trail draws line segments");
+    check(trail_segments == 2u and trail_draw.line_count == 2u, "viz trail draws line segments");
     check(near(trail_draw.first_line_color.a(), 0.25f), "viz trail applies tail alpha");
     check(near(trail_draw.last_line_color.a(), 0.85f), "viz trail applies head alpha");
+
+    auto aabb_draw = FakeDrawSink{};
+    const auto aabb_segments = ds_vk::viz::draw_aabb(
+        aabb_draw,
+        ds_vk::viz::AabbMarkerConfig{
+            .aabb =
+                {
+                    .min = {1.0f, 1.0f, 1.0f},
+                    .max = {-1.0f, -2.0f, 0.5f},
+                },
+            .color = ds_vk::Color{0.2f, 0.4f, 0.8f, 1.0f},
+        }
+    );
+    check(aabb_segments == 12zu and aabb_draw.line_count == 12zu, "viz aabb draws twelve edges");
+    check(near(aabb_draw.last_line_color.b(), 0.8f), "viz aabb forwards line color");
 }
 }  // namespace
 
 auto main() -> int
 {
-    test_color_types();
-    test_quad_mesh();
-    test_cube_mesh();
-    test_sphere_mesh();
-    test_camera_projection();
-    test_camera_config();
-    test_geometry_helpers();
-    test_picker_plugin();
-    test_viz_plugin();
+    try
+    {
+        test_color_types();
+        test_quad_mesh();
+        test_cube_mesh();
+        test_sphere_mesh();
+        test_gltf_assets();
+        test_camera_projection();
+        test_camera_config();
+        test_geometry_helpers();
+        test_picker_plugin();
+        test_viz_plugin();
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr << "[FAIL] unhandled exception: " << error.what() << '\n';
+        return 1;
+    }
     if (g_failures != 0)
     {
         std::cerr << g_failures << " test failure(s)\n";

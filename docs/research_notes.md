@@ -218,6 +218,56 @@ Implementation decisions:
   and light receiver booleans. These are per draw/object semantics and should
   not be tied to `MeshHandle`, because the same mesh resource can represent many
   app-owned objects.
+
+## DFSPH / PBA Migration MVP Pass
+
+Start time for this migration pass: 2026-05-16 07:56:29 CEST.
+Earliest stopping time requested by Daniel after revision:
+2026-05-16 08:56:29 CEST.
+
+Local projects scoped for migration pressure:
+
+- `/Users/danielsinkin/GitHub_private/SPH-Seminar/dfsph_viewer`
+- `/Users/danielsinkin/GitHub_private/physically-based-animation`
+
+Migration decisions:
+
+- Treat DFSPH and PBA as full `app/` users, not examples and not framework
+  modules. Their job is to pull on the framework from real use cases.
+- Keep scene theory out of `ds_vk`. Scene graphs, object ownership, playback
+  timelines, and domain state remain app concerns until repeated projects prove
+  a smaller reusable shape.
+- Add only narrow reusable framework pieces:
+  - `ds_vk::assets` for minimal glTF/GLB CPU mesh loading.
+  - `ds_vk::viz::draw_aabb` so DFSPH/PBA bounds visualization does not duplicate
+    line-corner code.
+  - `InputState::space_pressed` so interactive apps can pause simulations
+    without freezing camera/runtime input.
+- DFSPH MVP uses the vendored small-dambreak VTK history only. It intentionally
+  does not vendor SPlisHSPlasH or recreate the original scene/cache machinery.
+- PBA MVP keeps the physics in `app/pba/physics.*` as a headless app-owned
+  library. The current solver is an intentionally small realtime AABB pyramid
+  demo, not a migration of every old PBA scene.
+- PBA exposes bodies through `std::span<Body>` / `std::span<const Body>` rather
+  than returning the internal vector. The app can edit body state, but cannot
+  accidentally resize the simulation storage through the accessor.
+- GLB unknown chunks are intentionally skipped after length validation. That is
+  covered by a regression fixture because GLB is extension-friendly; malformed
+  headers, missing JSON, invalid accessors, and out-of-buffer reads still fail.
+  Khronos glTF 2.0 specifies that clients must ignore unknown GLB chunk types so
+  extensions can add later chunks:
+  https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#chunks-overview.
+
+Useful follow-up pressure points:
+
+- DFSPH particle rendering as one draw per particle is good enough for the MVP,
+  but the real reusable unlock is an instanced sphere/point path once particle
+  count becomes a bottleneck.
+- PBA collision is app-owned for now. A future manipulator plugin should depend
+  on picker and own only transient interaction state, with user callbacks for
+  transform get/set.
+- Capture/video export from the old projects is still a good candidate for a
+  `ds_vk::capture` module once screenshot validation stabilizes.
 - Reduce the fixed material texture table from 16 to 15 slots because the shadow
   map sampler shares the same fragment shader stage and MoltenVK commonly
   exposes a 16-sampler per-stage floor on Apple hardware.

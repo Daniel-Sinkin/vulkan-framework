@@ -2,6 +2,7 @@
 
 #include "ds_vk/camera.hpp"
 #include "ds_vk/debug_draw.hpp"
+#include "ds_vk/geometry.hpp"
 #include "ds_vk/types.hpp"
 
 #include <algorithm>
@@ -86,6 +87,13 @@ struct TrailConfig
     bool fade_alpha{true};
     f32 tail_alpha{0.22f};
     f32 head_alpha{1.0f};
+};
+
+struct AabbMarkerConfig
+{
+    Aabb aabb{};
+    Color color{0.42f, 0.70f, 0.88f, 0.55f};
+    f32 width{0.006f};
 };
 
 template <typename DrawSink>
@@ -178,5 +186,44 @@ auto draw_trail(DrawSink& draw, const TrailConfig& config) -> usize
         );
     }
     return segment_count;
+}
+
+template <typename DrawSink>
+auto draw_aabb(DrawSink& draw, const AabbMarkerConfig& config) -> usize
+{
+    const auto min = glm::min(config.aabb.min, config.aabb.max);
+    const auto max = glm::max(config.aabb.min, config.aabb.max);
+    const Vec3 p000{min.x, min.y, min.z};
+    const Vec3 p100{max.x, min.y, min.z};
+    const Vec3 p010{min.x, max.y, min.z};
+    const Vec3 p110{max.x, max.y, min.z};
+    const Vec3 p001{min.x, min.y, max.z};
+    const Vec3 p101{max.x, min.y, max.z};
+    const Vec3 p011{min.x, max.y, max.z};
+    const Vec3 p111{max.x, max.y, max.z};
+    const auto line = [&](Vec3 start, Vec3 end) -> void
+    {
+        draw.debug_line(
+            DebugLineConfig{
+                .start = start,
+                .end = end,
+                .color = config.color,
+                .width = config.width,
+            }
+        );
+    };
+    line(p000, p100);
+    line(p100, p110);
+    line(p110, p010);
+    line(p010, p000);
+    line(p001, p101);
+    line(p101, p111);
+    line(p111, p011);
+    line(p011, p001);
+    line(p000, p001);
+    line(p100, p101);
+    line(p010, p011);
+    line(p110, p111);
+    return 12zu;
 }
 }  // namespace ds_vk::viz

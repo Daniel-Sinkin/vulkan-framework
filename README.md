@@ -19,8 +19,12 @@ The app target is `ds_vk_basic_app` when Vulkan and `glslc` are available.
 ```sh
 ./run.sh
 ./run.sh --app vectorfield
+./run.sh --app dfsph
+./run.sh --app pba
 ./run.sh --smoke-frames 20 --screenshot run/basic.png --hide-ui
 ./run.sh --app vectorfield --smoke-frames 20 --screenshot run/vectorfield.png --hide-ui
+./run.sh --app dfsph --smoke-frames 20 --screenshot run/dfsph.png --hide-ui
+./run.sh --app pba --smoke-frames 20 --screenshot run/pba.png --hide-ui
 ./build/ds_vk_basic_app
 ./build/ds_vk_vectorfield_app
 ./build/ds_vk_basic_app --smoke-frames 20 --screenshot run/basic.png --hide-ui
@@ -51,6 +55,19 @@ The first full user lives in `app/`, not `examples/`. `ds_vk_basic_app` shows:
 own vectorfield examples, time controls, trace seeds, and selection state while
 using `ds_vk::viz` trails/vector arrows and `ds_vk::Picker` screen-segment
 picking.
+
+`ds_vk_dfsph_app` is an MVP fixed-data migration of the old DFSPH viewer. It
+loads the vendored small dambreak SPlisHSPlasH VTK history from
+`assets/dfsph/dambreak_small_iisph_v1/vtk`, plays it back, and uses `ds_vk::viz`
+for optional velocity arrows.
+
+`ds_vk_pba_app` is an MVP realtime rigid-body visualization user. It owns its
+physics state locally, uses Space to pause/resume simulation while camera input
+continues working, and routes speed coloring plus velocity arrows through
+`ds_vk::viz`.
+
+`ds_vk/assets.hpp` currently provides a small CPU-side glTF/GLB mesh loader into
+`MeshData`. It is intentionally not a runtime resource manager.
 
 Research and design notes live in `docs/`.
 

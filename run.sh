@@ -19,8 +19,14 @@ case "${app_name}" in
     vectorfield)
         target="ds_vk_vectorfield_app"
         ;;
+    dfsph)
+        target="ds_vk_dfsph_app"
+        ;;
+    pba)
+        target="ds_vk_pba_app"
+        ;;
     *)
-        echo "unknown app '${app_name}' (expected basic or vectorfield)" >&2
+        echo "unknown app '${app_name}' (expected basic, vectorfield, dfsph, or pba)" >&2
         exit 2
         ;;
 esac

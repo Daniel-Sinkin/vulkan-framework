@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
@@ -18,13 +19,12 @@
 #include <imgui_impl_vulkan.h>
 #include <iostream>
 #include <numbers>
+#include <stb_image.h>
+#include <stb_image_write.h>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <stb_image.h>
-#include <stb_image_write.h>
 
 namespace ds_vk
 {
@@ -34,7 +34,7 @@ constexpr auto k_swapchain_image_usage =
     VkImageUsageFlags{VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
 constexpr auto k_max_material_textures = u32{15};
 constexpr auto k_max_lights = u32{16};
-constexpr auto k_default_texture_index = u32{0};
+constexpr auto k_default_texture_index = 0u;
 
 struct Buffer
 {
@@ -159,7 +159,7 @@ constexpr auto k_required_push_constant_bytes =
 [[nodiscard]] auto material_base_color_texture_index(const Material& material) noexcept -> u32
 {
     if (material.textures.base_color.valid()
-        && material.textures.base_color.id < k_max_material_textures)
+        and material.textures.base_color.id < k_max_material_textures)
     {
         return material.textures.base_color.id;
     }
@@ -177,7 +177,7 @@ auto to_gpu_material(
 ) noexcept -> GpuMaterial
 {
     auto debug_mode = debug.mode;
-    if (debug.selected && debug_mode == MeshDebugMode::none)
+    if (debug.selected and debug_mode == MeshDebugMode::none)
     {
         debug_mode = MeshDebugMode::selected_pulse;
     }
@@ -286,9 +286,9 @@ auto to_gpu_material(
     return false;
 }
 
-[[nodiscard]] auto shadow_light_index(const std::vector<LightConfig>& lights) noexcept -> u32
+[[nodiscard]] auto shadow_light_index(std::span<const LightConfig> lights) noexcept -> u32
 {
-    for (auto i = u32{0}; i < std::min(static_cast<u32>(lights.size()), k_max_lights); ++i)
+    for (auto i = 0u; i < std::min(static_cast<u32>(lights.size()), k_max_lights); ++i)
     {
         if (shadow_supported_by_light(lights[i]))
         {
@@ -336,7 +336,7 @@ auto to_gpu_material(
                     light.shadow.far_plane
                 );
                 projection[1][1] *= -1.0f;
-                static_cast<void>(camera);
+                (void) camera;
                 return projection;
             }
     }
@@ -366,7 +366,7 @@ light_view_projection_matrix(const LightConfig& light, const Camera& camera) noe
 }
 
 [[nodiscard]] auto build_gpu_lighting(
-    const std::vector<LightConfig>& lights,
+    std::span<const LightConfig> lights,
     Color ambient_light,
     const Camera& camera,
     u32 shadow_index,
@@ -392,7 +392,7 @@ light_view_projection_matrix(const LightConfig& light, const Camera& camera) noe
             static_cast<f32>(std::max(1u, shadow_resolution)),
         };
     }
-    for (auto i = u32{0}; i < std::min(static_cast<u32>(lights.size()), k_max_lights); ++i)
+    for (auto i = 0u; i < std::min(static_cast<u32>(lights.size()), k_max_lights); ++i)
     {
         lighting.lights[i] = to_gpu_light(lights[i], i == shadow_index);
     }
@@ -403,22 +403,30 @@ auto check_vk_result(const VkResult result) -> void
 {
     if (result != VK_SUCCESS)
     {
-        throw std::runtime_error("Vulkan call failed with VkResult " + std::to_string(result));
+        throw std::runtime_error(
+            std::format("Vulkan call failed with VkResult {}", static_cast<int>(result))
+        );
     }
 }
 
 template <typename T>
-auto vector_byte_size(const std::vector<T>& values) noexcept -> VkDeviceSize
+auto data_byte_size(std::span<const T> values) noexcept -> VkDeviceSize
 {
     return static_cast<VkDeviceSize>(values.size()) * static_cast<VkDeviceSize>(sizeof(T));
 }
 
+template <typename T>
+auto data_byte_size(const std::vector<T>& values) noexcept -> VkDeviceSize
+{
+    return data_byte_size(std::span<const T>{values.data(), values.size()});
+}
+
 auto layer_available(const char* name) -> bool
 {
-    auto count = u32{};
-    static_cast<void>(vkEnumerateInstanceLayerProperties(&count, nullptr));
+    auto count = 0u;
+    (void) vkEnumerateInstanceLayerProperties(&count, nullptr);
     auto layers = std::vector<VkLayerProperties>(count);
-    static_cast<void>(vkEnumerateInstanceLayerProperties(&count, layers.data()));
+    (void) vkEnumerateInstanceLayerProperties(&count, layers.data());
     return std::ranges::any_of(
         layers,
         [&](const VkLayerProperties& layer) -> bool
@@ -441,12 +449,12 @@ auto read_shader_words(const std::filesystem::path& path) -> std::vector<u32>
     auto input = std::ifstream{path, std::ios::binary | std::ios::ate};
     if (!input)
     {
-        throw std::runtime_error("failed to open shader: " + path.string());
+        throw std::runtime_error(std::format("failed to open shader: {}", path.string()));
     }
     const auto end = input.tellg();
-    if (end <= 0 || (static_cast<u64>(end) % sizeof(u32)) != 0u)
+    if (end <= 0 or (static_cast<u64>(end) % sizeof(u32)) != 0u)
     {
-        throw std::runtime_error("shader has invalid SPIR-V size: " + path.string());
+        throw std::runtime_error(std::format("shader has invalid SPIR-V size: {}", path.string()));
     }
     auto words = std::vector<u32>(static_cast<usize>(end) / sizeof(u32));
     input.seekg(0, std::ios::beg);
@@ -456,7 +464,7 @@ auto read_shader_words(const std::filesystem::path& path) -> std::vector<u32>
     );
     if (!input)
     {
-        throw std::runtime_error("failed to read shader: " + path.string());
+        throw std::runtime_error(std::format("failed to read shader: {}", path.string()));
     }
     return words;
 }
@@ -511,8 +519,8 @@ auto DrawList::set_ambient_light(Color color) -> void
 
 auto DrawList::draw_mesh(const MeshDrawConfig& config) -> void
 {
-    if (!config.mesh.valid() || config.debug.hidden
-        || (!config.mask.visible_to_camera && !config.mask.shadow_producer))
+    if (!config.mesh.valid() or config.debug.hidden
+        or (!config.mask.visible_to_camera and !config.mask.shadow_producer))
     {
         return;
     }
@@ -669,19 +677,19 @@ auto DrawList::spot_light(const SpotLightConfig& config) -> void
     );
 }
 
-auto DrawList::mesh_commands() const noexcept -> const std::vector<MeshDrawCommand>&
+auto DrawList::mesh_commands() const noexcept -> std::span<const MeshDrawCommand>
 {
-    return mesh_commands_;
+    return std::span<const MeshDrawCommand>{mesh_commands_.data(), mesh_commands_.size()};
 }
 
-auto DrawList::debug_segments() const noexcept -> const std::vector<DebugSegment>&
+auto DrawList::debug_segments() const noexcept -> std::span<const DebugSegment>
 {
-    return debug_segments_;
+    return std::span<const DebugSegment>{debug_segments_.data(), debug_segments_.size()};
 }
 
-auto DrawList::lights() const noexcept -> const std::vector<LightConfig>&
+auto DrawList::lights() const noexcept -> std::span<const LightConfig>
 {
-    return lights_;
+    return std::span<const LightConfig>{lights_.data(), lights_.size()};
 }
 
 auto DrawList::ambient_light() const noexcept -> Color
@@ -852,7 +860,7 @@ auto Runtime::Impl::destroy_buffer(Buffer& buffer) noexcept -> void
 
 auto Runtime::Impl::begin_immediate_commands() -> VkCommandBuffer
 {
-    if (window_data.Frames.Size <= 0 || window_data.Frames[0].CommandPool == VK_NULL_HANDLE)
+    if (window_data.Frames.Size <= 0 or window_data.Frames[0].CommandPool == VK_NULL_HANDLE)
     {
         throw std::runtime_error("immediate Vulkan upload requires an initialized command pool");
     }
@@ -890,7 +898,7 @@ auto Runtime::Impl::create_texture_resource(
     const u8* pixels, u32 width, u32 height, VkFormat format
 ) -> TextureResource
 {
-    if (width == 0u || height == 0u || pixels == nullptr)
+    if (width == 0u or height == 0u or !pixels)
     {
         throw std::runtime_error("cannot create texture from empty image data");
     }
@@ -1065,8 +1073,7 @@ auto Runtime::Impl::load_texture(
     if (textures.size() >= k_max_material_textures)
     {
         throw std::runtime_error(
-            "ds_vk material texture table is full (max " + std::to_string(k_max_material_textures)
-            + ")"
+            std::format("ds_vk material texture table is full (max {})", k_max_material_textures)
         );
     }
 
@@ -1074,10 +1081,10 @@ auto Runtime::Impl::load_texture(
     auto height = int{};
     auto channels = int{};
     auto* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, STBI_rgb_alpha);
-    if (pixels == nullptr)
+    if (!pixels)
     {
         throw std::runtime_error(
-            "failed to load texture " + path.string() + ": " + stbi_failure_reason()
+            std::format("failed to load texture {}: {}", path.string(), stbi_failure_reason())
         );
     }
 
@@ -1117,7 +1124,7 @@ auto Runtime::Impl::ensure_debug_buffer(u32 frame_index, VkDeviceSize size) -> B
         debug_segment_buffers.resize(window_data.ImageCount);
     }
     auto& buffer = debug_segment_buffers.at(frame_index);
-    if (buffer.capacity >= size && buffer.handle != VK_NULL_HANDLE)
+    if (buffer.capacity >= size and buffer.handle != VK_NULL_HANDLE)
     {
         return buffer;
     }
@@ -1137,7 +1144,7 @@ auto Runtime::Impl::ensure_mesh_material_buffer(u32 frame_index, VkDeviceSize si
         mesh_material_buffers.resize(window_data.ImageCount);
     }
     auto& buffer = mesh_material_buffers.at(frame_index);
-    if (buffer.capacity >= size && buffer.handle != VK_NULL_HANDLE)
+    if (buffer.capacity >= size and buffer.handle != VK_NULL_HANDLE)
     {
         return buffer;
     }
@@ -1158,7 +1165,7 @@ auto Runtime::Impl::ensure_mesh_lighting_buffer(u32 frame_index) -> Buffer&
         mesh_lighting_buffers.resize(window_data.ImageCount);
     }
     auto& buffer = mesh_lighting_buffers.at(frame_index);
-    if (buffer.capacity >= sizeof(GpuLighting) && buffer.handle != VK_NULL_HANDLE)
+    if (buffer.capacity >= sizeof(GpuLighting) and buffer.handle != VK_NULL_HANDLE)
     {
         return buffer;
     }
@@ -1238,8 +1245,7 @@ auto Runtime::Impl::update_mesh_texture_descriptors() -> void
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
     image_infos.fill(default_info);
-    for (auto i = u32{0}; i < std::min(static_cast<u32>(textures.size()), k_max_material_textures);
-         ++i)
+    for (auto i = 0u; i < std::min(static_cast<u32>(textures.size()), k_max_material_textures); ++i)
     {
         image_infos[i] = VkDescriptorImageInfo{
             .sampler = textures[i].sampler,
@@ -1264,7 +1270,7 @@ auto Runtime::Impl::update_mesh_texture_descriptors() -> void
 
 auto Runtime::Impl::update_mesh_shadow_descriptors() -> void
 {
-    if (mesh_descriptor_sets.empty() || shadow_map.view == VK_NULL_HANDLE)
+    if (mesh_descriptor_sets.empty() or shadow_map.view == VK_NULL_HANDLE)
     {
         return;
     }
@@ -1293,13 +1299,13 @@ auto Runtime::Impl::create_mesh_resource(const MeshData& mesh) -> MeshResource
     {
         throw std::runtime_error("mesh upload requires an initialized ds_vk::Runtime");
     }
-    if (mesh.vertices.empty() || mesh.indices.empty() || !has_valid_indices(mesh))
+    if (mesh.vertices.empty() or mesh.indices.empty() or !has_valid_indices(mesh))
     {
         throw std::runtime_error("cannot upload empty mesh or mesh with invalid indices");
     }
 
-    const auto vertex_bytes = vector_byte_size(mesh.vertices);
-    const auto index_bytes = vector_byte_size(mesh.indices);
+    const auto vertex_bytes = data_byte_size(mesh.vertices);
+    const auto index_bytes = data_byte_size(mesh.indices);
     auto resource = MeshResource{};
     try
     {
@@ -1342,7 +1348,7 @@ auto Runtime::Impl::upload_mesh(const MeshData& mesh) -> MeshHandle
 
 auto Runtime::Impl::replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle
 {
-    if (!handle.valid() || handle.id >= meshes.size())
+    if (!handle.valid() or handle.id >= meshes.size())
     {
         return upload_mesh(mesh);
     }
@@ -1588,7 +1594,7 @@ auto Runtime::Impl::install_depth_rendering() -> void
         vkDestroyRenderPass(device, window_data.RenderPass, allocation_callbacks);
         window_data.RenderPass = VK_NULL_HANDLE;
     }
-    if (window_data.Width <= 0 || window_data.Height <= 0 || window_data.ImageCount == 0u)
+    if (window_data.Width <= 0 or window_data.Height <= 0 or window_data.ImageCount == 0u)
     {
         return;
     }
@@ -1689,7 +1695,7 @@ auto Runtime::Impl::setup_sdl() -> void
         static_cast<int>(static_cast<f32>(config.initial_height) * display_scale),
         flags
     );
-    if (window == nullptr)
+    if (!window)
     {
         throw std::runtime_error(SDL_GetError());
     }
@@ -1697,7 +1703,7 @@ auto Runtime::Impl::setup_sdl() -> void
 
 auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -> void
 {
-    auto instance_extension_count = u32{};
+    auto instance_extension_count = 0u;
     check_vk_result(
         vkEnumerateInstanceExtensionProperties(nullptr, &instance_extension_count, nullptr)
     );
@@ -1733,7 +1739,7 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
 #endif
 
     const auto* validation_layer = "VK_LAYER_KHRONOS_validation";
-    if (config.enable_validation && layer_available(validation_layer))
+    if (config.enable_validation and layer_available(validation_layer))
     {
         create_info.enabledLayerCount = 1;
         create_info.ppEnabledLayerNames = &validation_layer;
@@ -1767,7 +1773,7 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
         );
     }
 
-    auto device_extension_count = u32{};
+    auto device_extension_count = 0u;
     check_vk_result(vkEnumerateDeviceExtensionProperties(
         physical_device, nullptr, &device_extension_count, nullptr
     ));
@@ -1803,10 +1809,10 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
 
     const auto supports_vulkan_1_2 =
         VK_VERSION_MAJOR(physical_device_properties.apiVersion) > 1u
-        || (VK_VERSION_MAJOR(physical_device_properties.apiVersion) == 1u
-            && VK_VERSION_MINOR(physical_device_properties.apiVersion) >= 2u);
+        or (VK_VERSION_MAJOR(physical_device_properties.apiVersion) == 1u
+            and VK_VERSION_MINOR(physical_device_properties.apiVersion) >= 2u);
     const auto can_enable_descriptor_indexing =
-        supports_vulkan_1_2 || has_descriptor_indexing_extension;
+        supports_vulkan_1_2 or has_descriptor_indexing_extension;
 
     VkPhysicalDeviceDescriptorIndexingFeatures descriptor_features{};
     descriptor_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
@@ -1832,7 +1838,7 @@ auto Runtime::Impl::setup_vulkan(std::vector<const char*> instance_extensions) -
 
     descriptor_indexing = DescriptorIndexingSupport{
         .descriptor_indexing = descriptor_features.runtimeDescriptorArray == VK_TRUE
-                               || descriptor_features.descriptorBindingPartiallyBound == VK_TRUE,
+                               or descriptor_features.descriptorBindingPartiallyBound == VK_TRUE,
         .sampled_image_array_dynamic_indexing =
             available_features.features.shaderSampledImageArrayDynamicIndexing == VK_TRUE,
         .runtime_descriptor_array = descriptor_features.runtimeDescriptorArray == VK_TRUE,
@@ -2086,7 +2092,7 @@ auto Runtime::Impl::create_pipelines() -> void
     check_vk_result(
         vkAllocateDescriptorSets(device, &descriptor_allocate_info, mesh_descriptor_sets.data())
     );
-    for (auto i = u32{0};
+    for (auto i = 0u;
          i < std::min(static_cast<u32>(mesh_material_buffers.size()), window_data.ImageCount);
          ++i)
     {
@@ -2094,7 +2100,7 @@ auto Runtime::Impl::create_pipelines() -> void
         {
             update_mesh_material_descriptor(i, mesh_material_buffers[i]);
         }
-        if (i < mesh_lighting_buffers.size() && mesh_lighting_buffers[i].handle != VK_NULL_HANDLE)
+        if (i < mesh_lighting_buffers.size() and mesh_lighting_buffers[i].handle != VK_NULL_HANDLE)
         {
             update_mesh_lighting_descriptor(i, mesh_lighting_buffers[i]);
         }
@@ -2407,8 +2413,8 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
     const auto& mesh_commands = draw_list.mesh_commands();
     const auto& lights = draw_list.lights();
     const auto shadow_index = shadow_light_index(lights);
-    if (mesh_commands.empty() || shadow_index >= lights.size() || shadow_pipeline == VK_NULL_HANDLE
-        || shadow_map.framebuffer == VK_NULL_HANDLE)
+    if (mesh_commands.empty() or shadow_index >= lights.size() or shadow_pipeline == VK_NULL_HANDLE
+        or shadow_map.framebuffer == VK_NULL_HANDLE)
     {
         return;
     }
@@ -2446,8 +2452,8 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
 
     for (const auto& command : mesh_commands)
     {
-        if (!command.mask.shadow_producer || !command.mesh.valid()
-            || command.mesh.id >= meshes.size())
+        if (!command.mask.shadow_producer or !command.mesh.valid()
+            or command.mesh.id >= meshes.size())
         {
             continue;
         }
@@ -2501,7 +2507,7 @@ auto Runtime::Impl::draw_shadow_map(const VkCommandBuffer command_buffer) -> voi
 auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
     -> void
 {
-    if (draw_list.mesh_commands().empty() || mesh_pipeline == VK_NULL_HANDLE)
+    if (draw_list.mesh_commands().empty() or mesh_pipeline == VK_NULL_HANDLE)
     {
         return;
     }
@@ -2531,7 +2537,7 @@ auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D exten
             camera_forward
         ));
     }
-    const auto material_byte_count = vector_byte_size(mesh_material_upload);
+    const auto material_byte_count = data_byte_size(mesh_material_upload);
     auto& material_buffer = ensure_mesh_material_buffer(frame_index, material_byte_count);
     std::memcpy(
         material_buffer.mapped, mesh_material_upload.data(), static_cast<usize>(material_byte_count)
@@ -2554,8 +2560,8 @@ auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D exten
     for (auto command_index = 0zu; command_index < mesh_commands.size(); ++command_index)
     {
         const auto& command = mesh_commands[command_index];
-        if (!command.mask.visible_to_camera || !command.mesh.valid()
-            || command.mesh.id >= meshes.size())
+        if (!command.mask.visible_to_camera or !command.mesh.valid()
+            or command.mesh.id >= meshes.size())
         {
             continue;
         }
@@ -2582,12 +2588,12 @@ auto Runtime::Impl::draw_meshes(VkCommandBuffer command_buffer, VkExtent2D exten
 auto Runtime::Impl::draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, u32 frame_index)
     -> void
 {
-    if (draw_list.debug_segments().empty() || debug_pipeline == VK_NULL_HANDLE)
+    if (draw_list.debug_segments().empty() or debug_pipeline == VK_NULL_HANDLE)
     {
         return;
     }
 
-    const auto byte_count = vector_byte_size(draw_list.debug_segments());
+    const auto byte_count = data_byte_size(draw_list.debug_segments());
     auto& buffer = ensure_debug_buffer(frame_index, byte_count);
     std::memcpy(buffer.mapped, draw_list.debug_segments().data(), static_cast<usize>(byte_count));
 
@@ -2628,7 +2634,7 @@ auto Runtime::Impl::render_frame(
     draw_meshes(command_buffer, extent, frame_index);
     draw_debug(command_buffer, extent, frame_index);
 
-    if (draw_data != nullptr)
+    if (draw_data)
     {
         ImGui_ImplVulkan_RenderDrawData(draw_data, command_buffer);
     }
@@ -2698,19 +2704,24 @@ auto Runtime::Impl::handle_event(const SDL_Event& event, bool& done, bool& orbit
         done = true;
     }
     if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED
-        && event.window.windowID == SDL_GetWindowID(window))
+        and event.window.windowID == SDL_GetWindowID(window))
     {
         done = true;
     }
-    if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)
+    if (event.type == SDL_EVENT_KEY_DOWN and event.key.key == SDLK_ESCAPE)
     {
         done = true;
     }
-    if (event.type == SDL_EVENT_WINDOW_RESIZED || event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
+    if (event.type == SDL_EVENT_KEY_DOWN and event.key.key == SDLK_SPACE and !event.key.repeat
+        and !io.WantCaptureKeyboard)
+    {
+        input.space_pressed = true;
+    }
+    if (event.type == SDL_EVENT_WINDOW_RESIZED or event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
     {
         swapchain_rebuild = true;
     }
-    if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !io.WantCaptureMouse)
+    if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN and !io.WantCaptureMouse)
     {
         input.mouse_px = framebuffer_mouse_position(event.button.x, event.button.y);
         if (event.button.button == SDL_BUTTON_RIGHT)
@@ -2743,7 +2754,7 @@ auto Runtime::Impl::handle_event(const SDL_Event& event, bool& done, bool& orbit
             panning = false;
         }
     }
-    if (event.type == SDL_EVENT_MOUSE_MOTION && !io.WantCaptureMouse)
+    if (event.type == SDL_EVENT_MOUSE_MOTION and !io.WantCaptureMouse)
     {
         input.mouse_px = framebuffer_mouse_position(event.motion.x, event.motion.y);
         auto framebuffer_width = 1;
@@ -2769,7 +2780,7 @@ auto Runtime::Impl::handle_event(const SDL_Event& event, bool& done, bool& orbit
             );
         }
     }
-    if (event.type == SDL_EVENT_MOUSE_WHEEL && !io.WantCaptureMouse)
+    if (event.type == SDL_EVENT_MOUSE_WHEEL and !io.WantCaptureMouse)
     {
         const auto sensitivity = std::clamp(camera.zoom_sensitivity(), 0.10f, 4.0f);
         camera.distance() *= std::exp(-event.wheel.y * 0.12f * sensitivity);
@@ -2807,8 +2818,9 @@ auto Runtime::Impl::reset_input_frame() -> void
 {
     auto mouse_x = 0.0f;
     auto mouse_y = 0.0f;
-    static_cast<void>(SDL_GetMouseState(&mouse_x, &mouse_y));
+    (void) SDL_GetMouseState(&mouse_x, &mouse_y);
     input.left_click = {};
+    input.space_pressed = false;
     input.mouse_px = framebuffer_mouse_position(mouse_x, mouse_y);
     input.mouse_captured_by_ui = ImGui::GetIO().WantCaptureMouse;
 }
@@ -2823,7 +2835,7 @@ auto Runtime::Impl::rebuild_swapchain_if_needed() -> void
     auto width = 0;
     auto height = 0;
     SDL_GetWindowSizeInPixels(window, &width, &height);
-    if (width <= 0 || height <= 0)
+    if (width <= 0 or height <= 0)
     {
         return;
     }
@@ -2937,8 +2949,9 @@ auto Runtime::Impl::record_capture_commands(
 
 auto Runtime::Impl::write_capture_png(const SwapchainCapture& capture) -> void
 {
-    if (capture.format != VK_FORMAT_B8G8R8A8_UNORM && capture.format != VK_FORMAT_B8G8R8A8_SRGB
-        && capture.format != VK_FORMAT_R8G8B8A8_UNORM && capture.format != VK_FORMAT_R8G8B8A8_SRGB)
+    if (capture.format != VK_FORMAT_B8G8R8A8_UNORM and capture.format != VK_FORMAT_B8G8R8A8_SRGB
+        and capture.format != VK_FORMAT_R8G8B8A8_UNORM
+        and capture.format != VK_FORMAT_R8G8B8A8_SRGB)
     {
         throw std::runtime_error("screenshot capture only supports 8-bit RGBA/BGRA formats");
     }
@@ -2948,7 +2961,7 @@ auto Runtime::Impl::write_capture_png(const SwapchainCapture& capture) -> void
         std::filesystem::create_directories(capture.path.parent_path());
     }
     const auto bgra =
-        capture.format == VK_FORMAT_B8G8R8A8_UNORM || capture.format == VK_FORMAT_B8G8R8A8_SRGB;
+        capture.format == VK_FORMAT_B8G8R8A8_UNORM or capture.format == VK_FORMAT_B8G8R8A8_SRGB;
     auto rgba = std::vector<u8>(
         static_cast<usize>(capture.width) * static_cast<usize>(capture.height) * 4zu
     );
@@ -2961,9 +2974,9 @@ auto Runtime::Impl::write_capture_png(const SwapchainCapture& capture) -> void
             vmaInvalidateAllocation(vma_allocator, capture.allocation, 0, capture.size)
         );
         const auto* pixels = static_cast<const u8*>(mapped);
-        for (auto y = u32{0}; y < capture.height; ++y)
+        for (auto y = 0u; y < capture.height; ++y)
         {
-            for (auto x = u32{0}; x < capture.width; ++x)
+            for (auto x = 0u; x < capture.width; ++x)
             {
                 const auto i = (static_cast<usize>(y) * capture.width + x) * 4zu;
                 rgba[i + 0zu] = bgra ? pixels[i + 2zu] : pixels[i + 0zu];
@@ -3011,7 +3024,7 @@ auto Runtime::Impl::present_frame() -> void
     info.pSwapchains = &window_data.Swapchain;
     info.pImageIndices = &window_data.FrameIndex;
     const auto result = vkQueuePresentKHR(queue, &info);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+    if (result == VK_ERROR_OUT_OF_DATE_KHR or result == VK_SUBOPTIMAL_KHR)
     {
         swapchain_rebuild = true;
     }
@@ -3026,15 +3039,15 @@ auto Runtime::Impl::initialize() -> void
 {
     setup_sdl();
 
-    auto sdl_extension_count = u32{};
+    auto sdl_extension_count = 0u;
     const char* const* sdl_extensions = SDL_Vulkan_GetInstanceExtensions(&sdl_extension_count);
-    if (sdl_extensions == nullptr)
+    if (!sdl_extensions)
     {
         throw std::runtime_error("SDL_Vulkan_GetInstanceExtensions failed");
     }
     auto instance_extensions = std::vector<const char*>{};
     instance_extensions.reserve(sdl_extension_count + 4zu);
-    for (auto i = u32{0}; i < sdl_extension_count; ++i)
+    for (auto i = 0u; i < sdl_extension_count; ++i)
     {
         instance_extensions.push_back(sdl_extensions[i]);
     }
@@ -3061,7 +3074,7 @@ auto Runtime::Impl::shutdown() noexcept -> void
 {
     if (device != VK_NULL_HANDLE)
     {
-        static_cast<void>(vkDeviceWaitIdle(device));
+        (void) vkDeviceWaitIdle(device);
     }
 
     for (auto& buffer : debug_segment_buffers)
@@ -3141,7 +3154,7 @@ auto Runtime::Impl::shutdown() noexcept -> void
         vkDestroyInstance(instance, allocation_callbacks);
         instance = VK_NULL_HANDLE;
     }
-    if (window != nullptr)
+    if (window)
     {
         SDL_DestroyWindow(window);
         window = nullptr;
@@ -3161,7 +3174,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
     auto done = false;
     auto orbiting = false;
     auto panning = false;
-    auto frame_counter = u32{0};
+    auto frame_counter = 0u;
     auto previous = std::chrono::steady_clock::now();
     pending_screenshot = config.screenshot_path;
     pending_screenshot_transparent = config.transparent_screenshot;
@@ -3264,7 +3277,7 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
         const auto ui_end = std::chrono::steady_clock::now();
 
         auto capture = SwapchainCapture{};
-        if (!pending_screenshot.empty() && frame_counter >= 4u)
+        if (!pending_screenshot.empty() and frame_counter >= 4u)
         {
             capture.width = extent.width;
             capture.height = extent.height;
@@ -3343,8 +3356,8 @@ auto Runtime::Impl::run(const detail::RuntimeCallbacks& callbacks, Runtime& runt
         };
 
         ++frame_counter;
-        if (config.smoke_frames > 0u && frame_counter >= config.smoke_frames
-            && pending_screenshot.empty())
+        if (config.smoke_frames > 0u and frame_counter >= config.smoke_frames
+            and pending_screenshot.empty())
         {
             done = true;
         }

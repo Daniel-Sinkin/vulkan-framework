@@ -88,9 +88,37 @@ is not a renderer abstraction layer, game engine, or cross-API project.
 - `ds_vk/` is the framework/library: public headers, implementation files, and
   built-in shaders live together there.
 - `app/` contains full app users of the framework.
+- `app/pba/` is an app-owned headless physics library used by the PBA user. It
+  is intentionally not a framework scene or simulation module.
 - `tests/` contains executable test harnesses.
 - `external/` contains vendored dependencies.
 - `docs/` and `scripts/` support research and validation.
+
+## Current App Users
+
+- `ds_vk_basic_app` is the small interactive material/light/picker playground.
+- `ds_vk_vectorfield_app` is the vector-field visualization user that matures
+  `ds_vk::viz` without making vector fields part of the runtime core.
+- `ds_vk_dfsph_app` is a fixed-data DFSPH playback user. It loads the vendored
+  small-dambreak VTK history from `assets/dfsph/.../vtk`, renders particles as
+  mesh draws, and uses `ds_vk::viz` for velocity arrows and bounds markers. It
+  does not vendor SPlisHSPlasH or generate scenes on demand.
+- `ds_vk_pba_app` is a realtime rigid-body visualization user. Space toggles
+  simulation pause while camera controls continue to work. Its pyramid physics
+  is an app-side MVP AABB solver, with speed coloring and velocity arrows routed
+  through `ds_vk::viz`.
+
+## Asset Loading
+
+`ds_vk::assets` currently contains a small CPU-side glTF/GLB mesh loader for the
+framework's own visualization needs. It supports triangle primitives with
+positions, normals, texcoords, indices, embedded data URIs, external buffers, and
+GLB BIN chunks. It can generate smooth normals when a test mesh omits them.
+
+This is not yet a full asset system. It does not try to own scene hierarchy,
+animations, material graphs, skinning, or arbitrary glTF extensions. GLB unknown
+chunks are ignored after bounds validation, matching the extension-friendly GLB
+shape; missing required mesh data remains an error.
 
 ## App Surface
 

@@ -30,7 +30,7 @@ struct Obb
 {
     Vec3 center{};
     Vec3 half_extent{0.5f};
-    Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    Quat rotation{k_quat_identity};
 };
 
 struct Capsule

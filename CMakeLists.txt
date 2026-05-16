@@ -55,6 +55,7 @@ target_compile_options(ds_vk_warnings INTERFACE
 add_subdirectory(external/glm EXCLUDE_FROM_ALL)
 
 set(DS_VK_CORE_SOURCES
+  ds_vk/assets.cpp
   ds_vk/camera.cpp
   ds_vk/geometry.cpp
   ds_vk/mesh.cpp
@@ -63,6 +64,9 @@ set(DS_VK_CORE_SOURCES
 add_library(ds_vk_core STATIC ${DS_VK_CORE_SOURCES})
 target_include_directories(ds_vk_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(ds_vk_core SYSTEM PRIVATE
+  external
 )
 target_link_libraries(ds_vk_core PUBLIC glm::glm)
 target_link_libraries(ds_vk_core PRIVATE ds_vk_warnings)
@@ -85,11 +89,29 @@ target_include_directories(ds_vk_viz PUBLIC
 target_link_libraries(ds_vk_viz PUBLIC ds_vk_core)
 target_link_libraries(ds_vk_viz PRIVATE ds_vk_warnings)
 
+if(DS_VK_BUILD_APP OR DS_VK_BUILD_TESTS)
+  add_library(ds_vk_pba_user STATIC
+    app/pba/physics.cpp
+  )
+  target_include_directories(ds_vk_pba_user PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+  target_link_libraries(ds_vk_pba_user PUBLIC ds_vk_core)
+  target_link_libraries(ds_vk_pba_user PRIVATE ds_vk_warnings)
+endif()
+
 if(DS_VK_BUILD_TESTS)
   enable_testing()
   add_executable(ds_vk_tests tests/test_main.cpp)
+  target_compile_definitions(ds_vk_tests PRIVATE
+    DS_VK_TEST_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+  )
   target_link_libraries(ds_vk_tests PRIVATE ds_vk_picker ds_vk_viz ds_vk_warnings)
   add_test(NAME ds_vk_tests COMMAND ds_vk_tests)
+
+  add_executable(ds_vk_pba_user_tests tests/test_pba_user.cpp)
+  target_link_libraries(ds_vk_pba_user_tests PRIVATE ds_vk_pba_user ds_vk_warnings)
+  add_test(NAME ds_vk_pba_user_tests COMMAND ds_vk_pba_user_tests)
 endif()
 
 if(DS_VK_USE_SYSTEM_VULKAN)
@@ -199,6 +221,20 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
   add_executable(ds_vk_vectorfield_app app/vectorfield_main.cpp)
   target_link_libraries(ds_vk_vectorfield_app PRIVATE ds_vk ds_vk_picker ds_vk_viz ds_vk_warnings)
   ds_vk_enable_pch(ds_vk_vectorfield_app)
+
+  add_executable(ds_vk_dfsph_app app/dfsph_main.cpp)
+  target_compile_definitions(ds_vk_dfsph_app PRIVATE
+    DS_VK_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+  )
+  target_link_libraries(ds_vk_dfsph_app PRIVATE ds_vk ds_vk_viz ds_vk_warnings)
+  ds_vk_enable_pch(ds_vk_dfsph_app)
+
+  add_executable(ds_vk_pba_app app/pba_main.cpp)
+  target_compile_definitions(ds_vk_pba_app PRIVATE
+    DS_VK_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+  )
+  target_link_libraries(ds_vk_pba_app PRIVATE ds_vk ds_vk_viz ds_vk_pba_user ds_vk_warnings)
+  ds_vk_enable_pch(ds_vk_pba_app)
 
   if(DS_VK_BUILD_TESTS)
     add_executable(ds_vk_runtime_tests tests/test_runtime.cpp)

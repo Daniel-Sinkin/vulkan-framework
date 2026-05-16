@@ -42,8 +42,8 @@ template <typename Config>
     {
         return std::nullopt;
     }
-    const auto ndc = Vec3{clip} / clip.w;
-    if (ndc.z < 0.0f || ndc.z > 1.0f)
+    const Vec3 ndc = Vec3{clip} / clip.w;
+    if (ndc.z < 0.0f or ndc.z > 1.0f)
     {
         return std::nullopt;
     }
@@ -68,7 +68,7 @@ template <typename Config>
 {
     const auto start = project_to_screen(camera, segment.start, viewport_px);
     const auto end = project_to_screen(camera, segment.end, viewport_px);
-    if (!start.has_value() || !end.has_value())
+    if (!start.has_value() or !end.has_value())
     {
         return std::nullopt;
     }
@@ -172,9 +172,9 @@ auto Picker::raycast(const PickerRaycastConfig& config) const -> std::optional<P
     auto best = std::optional<PickerHit>{};
     for (const auto& target : targets_)
     {
-        const auto target_pickable = target.common.enabled && target.common.object_id.valid()
-                                     && layer_matches(target.common.layer, config.layer_mask)
-                                     && target.shape != PickerShapeType::screen_segment;
+        const auto target_pickable = target.common.enabled and target.common.object_id.valid()
+                                     and layer_matches(target.common.layer, config.layer_mask)
+                                     and target.shape != PickerShapeType::screen_segment;
         if (!target_pickable)
         {
             continue;
@@ -199,7 +199,7 @@ auto Picker::raycast(const PickerRaycastConfig& config) const -> std::optional<P
                 break;
         }
 
-        if (hit.has_value() && (!best.has_value() || hit->distance < best->distance))
+        if (hit.has_value() and (!best.has_value() or hit->distance < best->distance))
         {
             best = PickerHit{
                 .object_id = target.common.object_id,
@@ -228,9 +228,9 @@ auto Picker::click(const PickerClickConfig& config) const -> std::optional<Picke
     auto best = raycast(PickerRaycastConfig{.ray = ray, .layer_mask = config.layer_mask});
     for (const auto& target : targets_)
     {
-        const auto target_pickable = target.common.enabled && target.common.object_id.valid()
-                                     && layer_matches(target.common.layer, config.layer_mask)
-                                     && target.shape == PickerShapeType::screen_segment;
+        const auto target_pickable = target.common.enabled and target.common.object_id.valid()
+                                     and layer_matches(target.common.layer, config.layer_mask)
+                                     and target.shape == PickerShapeType::screen_segment;
         if (!target_pickable)
         {
             continue;
@@ -244,7 +244,7 @@ auto Picker::click(const PickerClickConfig& config) const -> std::optional<Picke
             config.mouse_px,
             config.viewport_px
         );
-        if (hit.has_value() && (!best.has_value() || hit->distance < best->distance))
+        if (hit.has_value() and (!best.has_value() or hit->distance < best->distance))
         {
             best = PickerHit{
                 .object_id = target.common.object_id,

@@ -50,7 +50,7 @@ auto make_camera_ray(const Camera& camera, Vec2 cursor_px, Vec2 viewport_px) noe
     auto far_world = inverse_view_projection * far_clip;
     near_world /= near_world.w;
     far_world /= far_world.w;
-    const auto origin = Vec3{near_world};
+    const Vec3 origin{near_world};
     return Ray{
         .origin = origin, .direction = normalize_or(Vec3{far_world - near_world}, -k_axis_z)
     };
@@ -90,13 +90,13 @@ auto intersect_aabb(const Ray& ray, const Aabb& aabb) noexcept -> std::optional<
     auto t_min = 0.0f;
     auto t_max = std::numeric_limits<f32>::max();
     auto hit = true;
-    for (auto axis = 0; axis < 3 && hit; ++axis)
+    for (auto axis = 0; axis < 3 and hit; ++axis)
     {
         const auto origin = ray.origin[axis];
         const auto direction = ray.direction[axis];
         if (std::abs(direction) <= 1.0e-8f)
         {
-            if (origin < box_min[axis] || origin > box_max[axis])
+            if (origin < box_min[axis] or origin > box_max[axis])
             {
                 hit = false;
             }

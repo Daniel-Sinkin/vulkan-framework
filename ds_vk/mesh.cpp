@@ -162,7 +162,7 @@ auto make_uv_sphere(const UvSphereConfig& config) -> MeshData
         {
             const auto u = static_cast<f32>(slice) / static_cast<f32>(slices);
             const auto theta = 2.0f * std::numbers::pi_v<f32> * u;
-            const auto normal = Vec3{
+            const Vec3 normal{
                 sin_phi * std::cos(theta),
                 sin_phi * std::sin(theta),
                 cos_phi,

@@ -24,7 +24,7 @@ struct MeshData
 struct Transform
 {
     Vec3 translation{};
-    Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    Quat rotation{k_quat_identity};
     Vec3 scale{1.0f};
 
     [[nodiscard]] auto matrix() const noexcept -> Mat4;

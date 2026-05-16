@@ -52,7 +52,7 @@ auto Camera::projection_mode() const noexcept   -> ProjectionMode  { return proj
 auto Camera::position() const noexcept -> Vec3
 {
     const auto cos_pitch = std::cos(pitch_);
-    const auto offset = Vec3{
+    const Vec3 offset{
         distance_ * cos_pitch * std::cos(yaw_),
         distance_ * cos_pitch * std::sin(yaw_),
         distance_ * std::sin(pitch_),

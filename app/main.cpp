@@ -87,7 +87,7 @@ class BasicViewerApp final
             .material = materials_.sphere,
             .debug = object_debug_config(object_ids_.sphere),
         });
-        if (show_debug_overlays && show_sphere_wire_)
+        if (show_debug_overlays and show_sphere_wire_)
         {
             frame.draw.debug_sphere({
                 .center = sphere_position_,
@@ -123,7 +123,7 @@ class BasicViewerApp final
             .debug = object_debug_config(object_ids_.small_sphere),
         });
 
-        if (show_debug_overlays && show_debug_axes_)
+        if (show_debug_overlays and show_debug_axes_)
         {
             const auto& cfg = debug_axis_cfg_;
             frame.draw.debug_arrow({
@@ -142,7 +142,7 @@ class BasicViewerApp final
                 .color = cfg.z_color,
             });
         }
-        if (show_debug_overlays && show_vector_field_)
+        if (show_debug_overlays and show_vector_field_)
         {
             viz::draw_vector_field(
                 frame.draw,
@@ -156,7 +156,7 @@ class BasicViewerApp final
                 }
             );
         }
-        if (show_debug_overlays && show_floor_grid_)
+        if (show_debug_overlays and show_floor_grid_)
         {
             const auto& cfg = floor_grid_cfg_;
             const auto dx = cfg.half_extent * k_axis_x;
@@ -187,7 +187,7 @@ class BasicViewerApp final
                 draw_line(i);
             }
         }
-        if (show_debug_overlays && show_light_gizmos_)
+        if (show_debug_overlays and show_light_gizmos_)
         {
             draw_light_gizmos(frame.draw);
         }
@@ -205,12 +205,12 @@ class BasicViewerApp final
             ImGui::Checkbox("Floor grid", &show_floor_grid_);
             ImGui::Checkbox("Vector field", &show_vector_field_);
             ImGui::Checkbox("Sphere wire", &show_sphere_wire_);
-            if (ImGui::Checkbox("Normal debug", &show_normal_debug_) && show_normal_debug_)
+            if (ImGui::Checkbox("Normal debug", &show_normal_debug_) and show_normal_debug_)
             {
                 show_camera_depth_debug_ = false;
             }
             if (ImGui::Checkbox("Camera depth debug", &show_camera_depth_debug_)
-                && show_camera_depth_debug_)
+                and show_camera_depth_debug_)
             {
                 show_normal_debug_ = false;
             }
@@ -268,7 +268,7 @@ class BasicViewerApp final
                 changed |= ImGui::SliderInt("Sphere stacks", &stacks, 4, 64);
                 sphere_slices_ = static_cast<ds_vk::u32>(std::clamp(slices, 8, 96));
                 sphere_stacks_ = static_cast<ds_vk::u32>(std::clamp(stacks, 4, 64));
-                if (changed || ImGui::Button("Rebuild sphere mesh"))
+                if (changed or ImGui::Button("Rebuild sphere mesh"))
                 {
                     rebuild_sphere();
                 }
@@ -307,14 +307,14 @@ class BasicViewerApp final
   private:
     [[nodiscard]] auto is_selected(ObjectId object_id) const noexcept -> bool
     {
-        return selected_object_id_.valid() && selected_object_id_.value == object_id.value;
+        return selected_object_id_.valid() and selected_object_id_.value == object_id.value;
     }
 
     [[nodiscard]] auto object_debug_config(ObjectId object_id, bool hidden = false) const noexcept
         -> MeshDebugConfig
     {
         auto debug = MeshDebugConfig{.hidden = hidden};
-        if (show_camera_depth_debug_ && !hidden)
+        if (show_camera_depth_debug_ and !hidden)
         {
             const auto& cfg = camera_depth_debug_cfg_;
             debug.mode = MeshDebugMode::camera_depth;
@@ -323,7 +323,7 @@ class BasicViewerApp final
             };
             return debug;
         }
-        if (show_normal_debug_ && !hidden)
+        if (show_normal_debug_ and !hidden)
         {
             debug.mode = MeshDebugMode::normal;
             return debug;
@@ -398,36 +398,36 @@ class BasicViewerApp final
 
     auto register_pick_targets() -> void
     {
-        static_cast<void>(picker_.add_sphere({
+        (void) picker_.add_sphere({
             .object_id = object_ids_.sphere,
             .sphere = {.center = sphere_position_, .radius = sphere_radius_},
-        }));
+        });
 
         if (!hide_cube_)
         {
             const auto cube = cube_transform();
-            static_cast<void>(picker_.add_obb({
+            (void) picker_.add_obb({
                 .object_id = object_ids_.cube,
                 .obb = {
                     .center = cube.translation,
                     .half_extent = 0.5f * glm::abs(cube.scale),
                     .rotation = cube.rotation,
                 },
-            }));
+            });
         }
         const auto column = column_transform();
-        static_cast<void>(picker_.add_obb({
+        (void) picker_.add_obb({
             .object_id = object_ids_.column,
             .obb = {
                 .center = column.translation,
                 .half_extent = 0.5f * glm::abs(column.scale),
                 .rotation = column.rotation,
             },
-        }));
-        static_cast<void>(picker_.add_sphere({
+        });
+        (void) picker_.add_sphere({
             .object_id = object_ids_.small_sphere,
             .sphere = {.center = small_sphere_position_, .radius = 0.36f},
-        }));
+        });
     }
 
     auto handle_selection_click(const FrameContext& frame) -> void
@@ -472,7 +472,7 @@ class BasicViewerApp final
 
     auto draw_selection_window() -> void
     {
-        if (!selection_window_open_ || !selected_object_id_.valid())
+        if (!selection_window_open_ or !selected_object_id_.valid())
         {
             return;
         }
@@ -776,11 +776,11 @@ auto main(const int argc, char** argv) -> int
                 print_usage(argv[0]);
                 return 0;
             }
-            if (arg == "--smoke-frames" && i + 1 < argc)
+            if (arg == "--smoke-frames" and i + 1 < argc)
             {
                 config.smoke_frames = parse_u32(argv[++i], 0u);
             }
-            else if (arg == "--screenshot" && i + 1 < argc)
+            else if (arg == "--screenshot" and i + 1 < argc)
             {
                 config.screenshot_path = argv[++i];
             }

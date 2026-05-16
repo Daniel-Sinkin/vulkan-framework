@@ -240,14 +240,12 @@ class VectorfieldApp final
     auto setup(Runtime& runtime) -> void
     {
         floor_mesh_ = runtime.upload_mesh(make_quad(7.0f, Color::white));
-        seed_mesh_ = runtime.upload_mesh(
-            make_uv_sphere({
-                .radius = 1.0f,
-                .slices = 16u,
-                .stacks = 8u,
-                .color = Color::white,
-            })
-        );
+        seed_mesh_ = runtime.upload_mesh(make_uv_sphere({
+            .radius = 1.0f,
+            .slices = 16u,
+            .stacks = 8u,
+            .color = Color::white,
+        }));
         trace_seeds_ = default_trace_seeds(config_.example);
         runtime.camera({
             .pivot = 0.22f * k_axis_z,
@@ -311,7 +309,9 @@ class VectorfieldApp final
                 config_.time_seconds = 0.0f;
                 selected_vector_index_ = k_invalid_selected_vector;
             }
-            ImGui::SliderFloat("Time", &config_.time_seconds, 0.0f, config_.max_time_seconds, "%.2f");
+            ImGui::SliderFloat(
+                "Time", &config_.time_seconds, 0.0f, config_.max_time_seconds, "%.2f"
+            );
             ImGui::SliderFloat("Playback speed", &config_.playback_speed, 0.0f, 3.0f, "%.2f");
             ImGui::Separator();
             ImGui::Checkbox("Vectors", &config_.show_vectors);
@@ -368,9 +368,7 @@ class VectorfieldApp final
         const auto extent = glm::max(glm::abs(config_.sample_extent), Vec3{0.05f});
         const auto spacing = std::max(0.05f, config_.sample_spacing);
         const auto axis_count = [spacing](f32 axis_extent) noexcept -> u32
-        {
-            return static_cast<u32>(std::floor((2.0f * axis_extent) / spacing)) + 1u;
-        };
+        { return static_cast<u32>(std::floor((2.0f * axis_extent) / spacing)) + 1u; };
         const auto counts = glm::uvec3{
             axis_count(extent.x),
             axis_count(extent.y),
@@ -386,8 +384,8 @@ class VectorfieldApp final
                    + 2.0f * axis_extent * static_cast<f32>(index) / static_cast<f32>(count - 1u);
         };
 
-        const auto sample_count =
-            static_cast<usize>(counts.x) * static_cast<usize>(counts.y) * static_cast<usize>(counts.z);
+        const auto sample_count = static_cast<usize>(counts.x) * static_cast<usize>(counts.y)
+                                  * static_cast<usize>(counts.z);
         vector_positions_.reserve(sample_count);
         vector_values_.reserve(sample_count);
         vector_magnitudes_.reserve(sample_count);
@@ -397,7 +395,7 @@ class VectorfieldApp final
             {
                 for (auto x = 0u; x < counts.x; ++x)
                 {
-                    const auto p = Vec3{
+                    const Vec3 p{
                         position_at(extent.x, counts.x, x),
                         position_at(extent.y, counts.y, y),
                         position_at(extent.z, counts.z, z),
@@ -411,10 +409,9 @@ class VectorfieldApp final
         }
         vector_ramp_.configure({
             .preset = config_.color_preset,
-            .range =
-                viz::range_from_values(
-                    std::span<const f32>{vector_magnitudes_.data(), vector_magnitudes_.size()}
-                ),
+            .range = viz::range_from_values(
+                std::span<const f32>{vector_magnitudes_.data(), vector_magnitudes_.size()}
+            ),
         });
     }
 
@@ -429,12 +426,12 @@ class VectorfieldApp final
             }
             const auto start = vector_positions_[i];
             const auto end = start + config_.vector_scale * vector_values_[i];
-            static_cast<void>(picker_.add_screen_segment({
+            (void) picker_.add_screen_segment({
                 .object_id = k_vector_target_id,
                 .sub_index = static_cast<u32>(i),
                 .segment = {.start = start, .end = end},
                 .radius_px = 10.0f,
-            }));
+            });
         }
     }
 
@@ -452,7 +449,7 @@ class VectorfieldApp final
                 static_cast<f32>(frame.extent.height),
             },
         });
-        if (hit.has_value() && hit->object_id.value == k_vector_target_id.value)
+        if (hit.has_value() and hit->object_id.value == k_vector_target_id.value)
         {
             selected_vector_index_ = static_cast<usize>(hit->sub_index);
             return;
@@ -479,8 +476,8 @@ class VectorfieldApp final
         for (auto i = -line_count; i <= line_count; ++i)
         {
             const auto p = static_cast<f32>(i) * extent / static_cast<f32>(line_count);
-            const auto color = i == 0 ? Color{0.30f, 0.36f, 0.38f, 1.0f}
-                                      : Color{0.20f, 0.25f, 0.27f, 1.0f};
+            const auto color =
+                i == 0 ? Color{0.30f, 0.36f, 0.38f, 1.0f} : Color{0.20f, 0.25f, 0.27f, 1.0f};
             draw.debug_line({
                 .start = {-extent, p, z},
                 .end = {extent, p, z},
@@ -536,19 +533,17 @@ class VectorfieldApp final
 
     auto draw_vectors(DrawList& draw) const -> void
     {
-        static_cast<void>(
-            viz::draw_vector_field(
-                draw,
-                viz::VectorFieldConfig{
-                    .positions =
-                        std::span<const Vec3>{vector_positions_.data(), vector_positions_.size()},
-                    .vectors = std::span<const Vec3>{vector_values_.data(), vector_values_.size()},
-                    .scale = config_.vector_scale,
-                    .width = config_.vector_width,
-                    .color_by_magnitude = true,
-                    .color_ramp = vector_ramp_,
-                }
-            )
+        (void) viz::draw_vector_field(
+            draw,
+            viz::VectorFieldConfig{
+                .positions =
+                    std::span<const Vec3>{vector_positions_.data(), vector_positions_.size()},
+                .vectors = std::span<const Vec3>{vector_values_.data(), vector_values_.size()},
+                .scale = config_.vector_scale,
+                .width = config_.vector_width,
+                .color_by_magnitude = true,
+                .color_ramp = vector_ramp_,
+            }
         );
     }
 
@@ -578,19 +573,17 @@ class VectorfieldApp final
         {
             const auto color = seed_color(i, trace_seeds_.size(), config_.color_preset);
             const auto points = trail_points(trace_seeds_[i]);
-            static_cast<void>(
-                viz::draw_trail(
-                    frame.draw,
-                    viz::TrailConfig{
-                        .points = std::span<const Vec3>{points.data(), points.size()},
-                        .color = color,
-                        .width = 0.007f,
-                        .tail_alpha = 0.16f,
-                        .head_alpha = 0.96f,
-                    }
-                )
+            (void) viz::draw_trail(
+                frame.draw,
+                viz::TrailConfig{
+                    .points = std::span<const Vec3>{points.data(), points.size()},
+                    .color = color,
+                    .width = 0.007f,
+                    .tail_alpha = 0.16f,
+                    .head_alpha = 0.96f,
+                }
             );
-            if (config_.show_seed_markers && !points.empty())
+            if (config_.show_seed_markers and !points.empty())
             {
                 frame.draw.draw_mesh({
                     .mesh = seed_mesh_,
@@ -624,8 +617,8 @@ class VectorfieldApp final
     auto draw_selected_vector(FrameContext& frame) const -> void
     {
         if (selected_vector_index_ == k_invalid_selected_vector
-            || selected_vector_index_ >= vector_positions_.size()
-            || selected_vector_index_ >= vector_values_.size())
+            or selected_vector_index_ >= vector_positions_.size()
+            or selected_vector_index_ >= vector_values_.size())
         {
             return;
         }
@@ -764,12 +757,12 @@ auto main(int argc, char** argv) -> int
                 print_usage(argv[0]);
                 return 0;
             }
-            if (arg == "--smoke-frames" && i + 1 < argc)
+            if (arg == "--smoke-frames" and i + 1 < argc)
             {
                 config.smoke_frames = parse_u32(argv[++i], 0u);
                 continue;
             }
-            if (arg == "--screenshot" && i + 1 < argc)
+            if (arg == "--screenshot" and i + 1 < argc)
             {
                 config.screenshot_path = std::filesystem::path{argv[++i]};
                 continue;

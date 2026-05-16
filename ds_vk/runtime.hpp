@@ -8,6 +8,7 @@
 #include <concepts>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 #include <vk_mem_alloc.h>
@@ -180,9 +181,9 @@ class DrawList
     auto radial_light(const RadialLightConfig& config)                 -> void;
     auto spot_light(const SpotLightConfig& config)                     -> void;
 
-    [[nodiscard]] auto mesh_commands() const noexcept                  -> const std::vector<MeshDrawCommand>&;
-    [[nodiscard]] auto debug_segments() const noexcept                 -> const std::vector<DebugSegment>&;
-    [[nodiscard]] auto lights() const noexcept                         -> const std::vector<LightConfig>&;
+    [[nodiscard]] auto mesh_commands() const noexcept                  -> std::span<const MeshDrawCommand>;
+    [[nodiscard]] auto debug_segments() const noexcept                 -> std::span<const DebugSegment>;
+    [[nodiscard]] auto lights() const noexcept                         -> std::span<const LightConfig>;
     [[nodiscard]] auto ambient_light() const noexcept                  -> Color;
     // clang-format on
 
@@ -244,6 +245,7 @@ struct InputState
 {
     Vec2 mouse_px{};
     bool mouse_captured_by_ui{};
+    bool space_pressed{};
     MouseClick left_click{};
 };
 
@@ -307,7 +309,7 @@ concept has_shutdown = requires(App& app, Runtime& runtime) {
 
 template <typename App>
 concept has_runtime_hook =
-    has_setup<App> || has_update<App> || has_draw_ui<App> || has_shutdown<App>;
+    has_setup<App> or has_update<App> or has_draw_ui<App> or has_shutdown<App>;
 }  // namespace detail
 
 class Runtime
