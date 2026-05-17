@@ -177,26 +177,26 @@ struct SpotLightConfig
 class DrawList
 {
   public:
+    auto clear() -> void;
+    auto set_ambient_light(Color color) -> void;
     // clang-format off
-    auto clear()                                                       -> void;
-    auto set_ambient_light(Color color)                                -> void;
-    auto draw_mesh(const MeshDrawConfig& config)                       -> void;
-    auto draw_basic_mesh(const BasicMeshDrawConfig& config)            -> void;
-    auto debug_line(const DebugLineConfig& config)                     -> void;
-    auto debug_arrow(const DebugArrowConfig& config)                   -> void;
-    auto debug_sphere(const DebugSphereConfig& config)                 -> void;
-    auto add_light(const LightConfig& config)                          -> void;
-    auto directional_light(const DirectionalLightConfig& config)       -> void;
-    auto radial_light(const RadialLightConfig& config)                 -> void;
-    auto spot_light(const SpotLightConfig& config)                     -> void;
-    auto set_environment(const EnvironmentConfig& config)              -> void;
+    auto draw_mesh        (const MeshDrawConfig&        ) -> void;
+    auto draw_basic_mesh  (const BasicMeshDrawConfig&   ) -> void;
+    auto debug_line       (const DebugLineConfig&       ) -> void;
+    auto debug_arrow      (const DebugArrowConfig&      ) -> void;
+    auto debug_sphere     (const DebugSphereConfig&     ) -> void;
+    auto add_light        (const LightConfig&           ) -> void;
+    auto directional_light(const DirectionalLightConfig&) -> void;
+    auto radial_light     (const RadialLightConfig&     ) -> void;
+    auto spot_light       (const SpotLightConfig&       ) -> void;
+    auto set_environment  (const EnvironmentConfig&     ) -> void;
 
-    [[nodiscard]] auto mesh_commands() const noexcept                  -> std::span<const MeshDrawCommand>;
-    [[nodiscard]] auto debug_segments() const noexcept                 -> std::span<const DebugSegment>;
-    [[nodiscard]] auto debug_on_top_segments() const noexcept          -> std::span<const DebugSegment>;
-    [[nodiscard]] auto lights() const noexcept                         -> std::span<const LightConfig>;
-    [[nodiscard]] auto ambient_light() const noexcept                  -> Color;
-    [[nodiscard]] auto environment() const noexcept                    -> const EnvironmentConfig&;
+    [[nodiscard]] auto mesh_commands()         const noexcept -> std::span<const MeshDrawCommand>;
+    [[nodiscard]] auto debug_segments()        const noexcept -> std::span<const DebugSegment>;
+    [[nodiscard]] auto debug_on_top_segments() const noexcept -> std::span<const DebugSegment>;
+    [[nodiscard]] auto lights()                const noexcept -> std::span<const LightConfig>;
+    [[nodiscard]] auto ambient_light()         const noexcept -> Color;
+    [[nodiscard]] auto environment()           const noexcept -> const EnvironmentConfig&;
     // clang-format on
 
   private:
@@ -352,41 +352,44 @@ class Runtime
     auto operator=(Runtime&&) noexcept -> Runtime&;
 
     // clang-format off
-    auto initialize()                                                                                       -> void;
-    auto shutdown() noexcept                                                                                -> void;
-    [[nodiscard]] auto begin_frame()                                                                        -> FrameContext*;
-    [[nodiscard]] auto frame()                                                                              -> FrameContext&;
-    [[nodiscard]] auto frame() const                                                                        -> const FrameContext&;
-    auto draw_runtime_ui()                                                                                  -> void;
-    auto render_shadow_pass()                                                                               -> void;
-    auto begin_main_pass()                                                                                  -> void;
-    auto render_draw_list()                                                                                 -> void;
-    auto render_imgui()                                                                                     -> void;
-    auto end_main_pass()                                                                                    -> void;
-    auto end_frame()                                                                                        -> void;
-    [[nodiscard]] auto ui_visible() const noexcept                                                          -> bool;
+    auto initialize()                -> void;
+    auto shutdown() noexcept         -> void;
 
-    [[nodiscard]] auto upload_mesh(const MeshData& mesh)                                                     -> MeshHandle;
-    [[nodiscard]] auto upload_mesh(const PositionNormalMeshData& mesh)                                       -> MeshHandle;
-    [[nodiscard]] auto upload_mesh(const QuantizedPositionNormalMeshData& mesh)                              -> MeshHandle;
-    [[nodiscard]] auto reserve_mesh_capacity(const MeshReserveConfig& cfg)                                   -> MeshHandle;
+    [[nodiscard]] auto begin_frame() -> FrameContext*;
+    [[nodiscard]] auto frame()       -> FrameContext&;
+    [[nodiscard]] auto frame() const -> const FrameContext&;
+
+    auto draw_runtime_ui()    -> void;
+    auto render_shadow_pass() -> void;
+    auto begin_main_pass()    -> void;
+    auto render_draw_list()   -> void;
+    auto render_imgui()       -> void;
+    auto end_main_pass()      -> void;
+    auto end_frame()          -> void;
+
+    [[nodiscard]] auto ui_visible() const noexcept -> bool;
+
+    [[nodiscard]] auto upload_mesh(const MeshData&)                        -> MeshHandle;
+    [[nodiscard]] auto upload_mesh(const PositionNormalMeshData&)          -> MeshHandle;
+    [[nodiscard]] auto upload_mesh(const QuantizedPositionNormalMeshData&) -> MeshHandle;
+    [[nodiscard]] auto reserve_mesh_capacity(const MeshReserveConfig&)     -> MeshHandle;
+
     // Reuses existing buffers when capacity permits. Callers must avoid updating a handle
     // still used by in-flight command buffers.
-    [[nodiscard]] auto update_mesh(MeshHandle handle, const MeshData& mesh, const MeshUpdateConfig& cfg = {})                        -> MeshHandle;
-    [[nodiscard]] auto update_mesh(MeshHandle handle, const PositionNormalMeshData& mesh, const MeshUpdateConfig& cfg = {})          -> MeshHandle;
-    [[nodiscard]] auto update_mesh(MeshHandle handle, const QuantizedPositionNormalMeshData& mesh, const MeshUpdateConfig& cfg = {}) -> MeshHandle;
-    [[nodiscard]] auto replace_mesh(MeshHandle handle, const MeshData& mesh)                                 -> MeshHandle;
-    [[nodiscard]] auto load_texture(const std::filesystem::path& path, const TextureLoadConfig& config = {}) -> TextureHandle;
-    [[nodiscard]] auto load_hdr_texture(
-        const std::filesystem::path& path, const HdrTextureLoadConfig& config = {}
-    ) -> TextureHandle;
-    auto request_screenshot(std::filesystem::path path, bool transparent = false)                            -> void;
+    [[nodiscard]] auto update_mesh(MeshHandle, const MeshData&, const MeshUpdateConfig& cfg = {})                        -> MeshHandle;
+    [[nodiscard]] auto update_mesh(MeshHandle, const PositionNormalMeshData&, const MeshUpdateConfig& cfg = {})          -> MeshHandle;
+    [[nodiscard]] auto update_mesh(MeshHandle, const QuantizedPositionNormalMeshData&, const MeshUpdateConfig& cfg = {}) -> MeshHandle;
 
-    auto camera(const CameraConfig& config) noexcept                                            -> Camera&;
-    [[nodiscard]] auto camera() noexcept                                                        -> Camera&;
-    [[nodiscard]] auto camera() const noexcept                                                  -> const Camera&;
-    [[nodiscard]] auto stats() const noexcept                                                   -> const RuntimeStats&;
-    [[nodiscard]] auto descriptor_indexing_support() const noexcept                             -> const DescriptorIndexingSupport&;
+    [[nodiscard]] auto replace_mesh(MeshHandle, const MeshData&) -> MeshHandle;
+    [[nodiscard]] auto load_texture(const std::filesystem::path&, const TextureLoadConfig& cfg = {}) -> TextureHandle;
+    [[nodiscard]] auto load_hdr_texture(const std::filesystem::path&, const HdrTextureLoadConfig& config = {}) -> TextureHandle;
+    auto request_screenshot(std::filesystem::path path, bool transparent = false) -> void;
+
+    auto camera(const CameraConfig& config)                noexcept -> Camera&;
+    [[nodiscard]] auto camera()                            noexcept -> Camera&;
+    [[nodiscard]] auto camera()                      const noexcept -> const Camera&;
+    [[nodiscard]] auto stats()                       const noexcept -> const RuntimeStats&;
+    [[nodiscard]] auto descriptor_indexing_support() const noexcept -> const DescriptorIndexingSupport&;
     // clang-format on
 
     template <typename App>

@@ -1,11 +1,17 @@
 // app/quake_main.cpp
 #include "ds_vk/math.hpp"
 #include "ds_vk/mesh.hpp"
+#include "ds_vk/plugins/picker.hpp"
 #include "ds_vk/plugins/viz.hpp"
 #include "ds_vk/runtime.hpp"
 #include "ds_vk/types.hpp"
 
+#include <SDL3/SDL.h>
+#include <imgui.h>
+
+#define OV_EXCLUDE_STATIC_CALLBACKS
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <concepts>
 #include <cstdlib>
@@ -13,15 +19,20 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mdspan>
 #include <optional>
 #include <print>
 #include <queue>
 #include <span>
+#include <string>
+#include <string_view>
 #include <system_error>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <vorbis/vorbisfile.h>
 
 namespace ds_vk_quake
 {
@@ -95,11 +106,243 @@ inline const std::filesystem::path quake_root{
     "/Users/danielsinkin/GitHub_private/vulkan-framework/app/quake"
 };
 inline auto asset_root = quake_root / "assets";
-inline auto progs_dir = asset_root / "models" / "progs";
+inline auto progs_dir = asset_root / "progs";
 inline auto maps_dir = asset_root / "maps";
 inline auto sounds_dir = asset_root / "sound";
+inline auto music_dir = asset_root / "music";
 inline auto texel_index_output_dir = quake_root / "outputs" / "texel_indices";
 }  // namespace paths
+
+class BackgroundMusic
+{
+  public:
+    BackgroundMusic() = default;
+    BackgroundMusic(const BackgroundMusic&) = delete;
+    auto operator=(const BackgroundMusic&) -> BackgroundMusic& = delete;
+
+    BackgroundMusic(BackgroundMusic&& other) noexcept
+        : spec_{other.spec_}, pcm_{std::move(other.pcm_)},
+          stream_{std::exchange(other.stream_, nullptr)},
+          cursor_{std::exchange(other.cursor_, 0zu)},
+          owns_audio_subsystem_{std::exchange(other.owns_audio_subsystem_, false)}
+    {
+    }
+
+    auto operator=(BackgroundMusic&& other) noexcept -> BackgroundMusic&
+    {
+        if (this == &other)
+        {
+            return *this;
+        }
+        reset();
+        spec_ = other.spec_;
+        pcm_ = std::move(other.pcm_);
+        stream_ = std::exchange(other.stream_, nullptr);
+        cursor_ = std::exchange(other.cursor_, 0zu);
+        owns_audio_subsystem_ = std::exchange(other.owns_audio_subsystem_, false);
+        return *this;
+    }
+
+    ~BackgroundMusic()
+    {
+        reset();
+    }
+
+    [[nodiscard]] static auto load_looped_ogg(const std::filesystem::path& filepath, f32 gain)
+        -> std::optional<BackgroundMusic>
+    {
+        const auto should_own_audio_subsystem = !SDL_WasInit(SDL_INIT_AUDIO);
+        if (should_own_audio_subsystem && !SDL_InitSubSystem(SDL_INIT_AUDIO))
+        {
+            std::println(stderr, "Failed to initialize SDL audio: {}", SDL_GetError());
+            return std::nullopt;
+        }
+        struct AudioSubsystemGuard
+        {
+            bool owns{};
+            ~AudioSubsystemGuard()
+            {
+                if (owns)
+                {
+                    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+                }
+            }
+
+            [[nodiscard]] auto release() -> bool
+            {
+                return std::exchange(owns, false);
+            }
+        } audio_guard{.owns = should_own_audio_subsystem};
+
+        const auto filepath_string = filepath.string();
+        OggVorbis_File vorbis{};
+        if (const auto open_result = ov_fopen(filepath_string.c_str(), &vorbis); open_result != 0)
+        {
+            std::println(
+                stderr,
+                "Failed to open OGG music {}: ov_fopen returned {}",
+                filepath_string,
+                open_result
+            );
+            return std::nullopt;
+        }
+
+        struct VorbisGuard
+        {
+            OggVorbis_File* file{};
+            ~VorbisGuard()
+            {
+                if (file != nullptr)
+                {
+                    ov_clear(file);
+                }
+            }
+        } vorbis_guard{.file = &vorbis};
+
+        const auto* info = ov_info(&vorbis, -1);
+        if (info == nullptr || info->channels <= 0 || info->rate <= 0
+            || info->rate > std::numeric_limits<int>::max())
+        {
+            std::println(stderr, "Invalid Vorbis stream info in {}", filepath_string);
+            return std::nullopt;
+        }
+
+        std::vector<std::byte> pcm{};
+        if (const auto frame_count = ov_pcm_total(&vorbis, -1); frame_count > 0)
+        {
+            constexpr auto bytes_per_sample = 2;
+            const auto bytes_per_frame =
+                static_cast<ogg_int64_t>(info->channels) * bytes_per_sample;
+            const auto byte_count = frame_count * bytes_per_frame;
+            if (byte_count > 0
+                && byte_count <= static_cast<ogg_int64_t>(std::numeric_limits<usize>::max()))
+            {
+                pcm.reserve(static_cast<usize>(byte_count));
+            }
+        }
+
+        std::array<char, 32 * 1024> decode_buf{};
+        auto bitstream = 0;
+        while (true)
+        {
+            const auto bytes_read = ov_read(
+                &vorbis, decode_buf.data(), static_cast<int>(decode_buf.size()), 0, 2, 1, &bitstream
+            );
+            if (bytes_read == 0)
+            {
+                break;
+            }
+            if (bytes_read < 0)
+            {
+                std::println(
+                    stderr,
+                    "Failed while decoding OGG music {}: ov_read returned {}",
+                    filepath_string,
+                    bytes_read
+                );
+                return std::nullopt;
+            }
+
+            const auto old_size = pcm.size();
+            pcm.resize(old_size + static_cast<usize>(bytes_read));
+            std::memcpy(pcm.data() + old_size, decode_buf.data(), static_cast<usize>(bytes_read));
+        }
+
+        if (pcm.empty())
+        {
+            std::println(stderr, "Decoded no PCM data from {}", filepath_string);
+            return std::nullopt;
+        }
+
+        BackgroundMusic out{};
+        out.spec_ = SDL_AudioSpec{
+            .format = SDL_AUDIO_S16LE,
+            .channels = info->channels,
+            .freq = static_cast<int>(info->rate),
+        };
+        out.pcm_ = std::move(pcm);
+        out.owns_audio_subsystem_ = audio_guard.release();
+        out.stream_ = SDL_OpenAudioDeviceStream(
+            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &out.spec_, nullptr, nullptr
+        );
+        if (out.stream_ == nullptr)
+        {
+            std::println(stderr, "Failed to open SDL audio stream: {}", SDL_GetError());
+            return std::nullopt;
+        }
+        if (!SDL_SetAudioStreamGain(out.stream_, gain))
+        {
+            std::println(stderr, "Failed to set music gain: {}", SDL_GetError());
+        }
+        if (!SDL_ResumeAudioStreamDevice(out.stream_))
+        {
+            std::println(stderr, "Failed to start SDL audio stream: {}", SDL_GetError());
+            return std::nullopt;
+        }
+        out.pump();
+        std::println("Looping background music: {}", filepath.filename().string());
+        return out;
+    }
+
+    auto pump() -> void
+    {
+        if (stream_ == nullptr || pcm_.empty())
+        {
+            return;
+        }
+
+        constexpr auto target_queued_bytes = 256 * 1024;
+        constexpr auto max_chunk_bytes = 64zu * 1024zu;
+
+        auto queued_bytes = SDL_GetAudioStreamQueued(stream_);
+        if (queued_bytes < 0)
+        {
+            std::println(stderr, "Failed to query SDL audio stream queue: {}", SDL_GetError());
+            return;
+        }
+
+        while (queued_bytes < target_queued_bytes)
+        {
+            const auto bytes_available = pcm_.size() - cursor_;
+            const auto chunk_size = std::min(max_chunk_bytes, bytes_available);
+            if (chunk_size == 0)
+            {
+                cursor_ = 0;
+                continue;
+            }
+
+            const auto chunk_size_int = static_cast<int>(chunk_size);
+            if (!SDL_PutAudioStreamData(stream_, pcm_.data() + cursor_, chunk_size_int))
+            {
+                std::println(stderr, "Failed to queue background music: {}", SDL_GetError());
+                return;
+            }
+            cursor_ = (cursor_ + chunk_size) % pcm_.size();
+            queued_bytes += chunk_size_int;
+        }
+    }
+
+  private:
+    auto reset() -> void
+    {
+        if (stream_ != nullptr)
+        {
+            SDL_DestroyAudioStream(stream_);
+            stream_ = nullptr;
+        }
+        if (owns_audio_subsystem_)
+        {
+            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+            owns_audio_subsystem_ = false;
+        }
+    }
+
+    SDL_AudioSpec spec_{};
+    std::vector<std::byte> pcm_{};
+    SDL_AudioStream* stream_{};
+    usize cursor_{};
+    bool owns_audio_subsystem_{};
+};
 
 // Identification marker for Id Software Binary File, little endian
 static constexpr i32 k_idpoly = (('O' << 24) + ('P' << 16) + ('D' << 8) + 'I');
@@ -293,6 +536,7 @@ struct MdlFrame
     MdlTriVertex bbox_min{};
     MdlTriVertex bbox_max{};
     std::array<char, 16> name{};
+    f32 interval{};
     std::vector<MdlTriVertex> vertices{};
 };
 
@@ -312,6 +556,44 @@ struct MdlInterval
 {
     f32 interval{};
 };
+
+using MdlSkinData = std::vector<u8>;
+
+struct MdlSkin
+{
+    std::vector<f32> intervals{};
+    std::vector<MdlSkinData> images{};
+};
+
+struct MdlBinary
+{
+    MdlHeader header{};
+    std::vector<MdlSkin> skins{};
+    std::vector<MdlVertex> stverts{};
+    std::vector<MdlTriangle> triangles{};
+    std::vector<MdlFrame> frames{};
+};
+
+template <typename T>
+    requires std::is_trivially_copyable_v<T>
+[[nodiscard]] auto read_value(std::span<const std::byte>& buf) -> T
+{
+    T out{};
+    std::memcpy(&out, buf.data(), sizeof(T));
+    buf = buf.subspan(sizeof(T));
+    return out;
+}
+
+template <typename T>
+    requires std::is_trivially_copyable_v<T>
+[[nodiscard]] auto read_values(std::span<const std::byte>& buf, usize count) -> std::vector<T>
+{
+    std::vector<T> out(count);
+    const auto bytes = count * sizeof(T);
+    std::memcpy(out.data(), buf.data(), bytes);
+    buf = buf.subspan(bytes);
+    return out;
+}
 
 // NOLINTNEXTLINE(performance-enum-size): Quake MDL stores this field as a 32-bit int.
 enum class MdlFrameType : i32
@@ -411,52 +693,52 @@ texcoord_for_vertex(const MdlHeader& header, const MdlVertex& vertex, const MdlT
 
 auto parse_mdl_header(std::span<const std::byte>& buf) -> MdlHeader
 {
-    MdlHeader header{};
-    std::memcpy(&header, buf.data(), sizeof(MdlHeader));
-    std::println("{}", to_string(header));
-    buf = buf.subspan(sizeof(MdlHeader));
+    const auto header = read_value<MdlHeader>(buf);
     return header;
 }
 
-using MdlSkinData = std::vector<u8>;
-
 namespace
 {
-auto parse_mdl_skins_single(std::span<const std::byte>& buf, const MdlHeader& header) -> MdlSkinData
+auto parse_mdl_skins_single(
+    std::span<const std::byte>& buf, const MdlHeader& header, bool flood_fill = true
+) -> MdlSkinData
 {
-    const auto pixel_count =
-        static_cast<usize>(header.skin_width) * static_cast<usize>(header.skin_height);
+    const auto sh = static_cast<usize>(header.skin_height);
+    const auto sw = static_cast<usize>(header.skin_width);
+    const auto pixel_count = sh * sw;
     std::vector<u8> out(pixel_count);
     std::memcpy(out.data(), buf.data(), out.size());
 
     const auto fill_origin = out[0];
     const auto fill_target = 0;  // TODO: Do palette lookup here instead
 
-    const auto sh = static_cast<usize>(header.skin_height);
-    const auto sw = static_cast<usize>(header.skin_width);
     std::mdspan<u8, std::dextents<usize, 2>> texels{out.data(), sh, sw};
 
-    std::queue<std::pair<int, int>> q{};
-    q.emplace(0, 0);
-    const auto try_neighbor = [&](int yp, int xp) -> void
+    if (flood_fill)
     {
-        const auto valid_y = in_interval(yp, 0, sh - 1);
-        const auto valid_x = in_interval(xp, 0, sw - 1);
-        if (valid_y and valid_x and texels[yp, xp] == fill_origin)
+        std::queue<std::pair<int, int>> q{};
+        texels[0, 0] = fill_target;
+        q.emplace(0, 0);
+        const auto try_neighbor = [&](int yp, int xp) -> void
         {
-            texels[yp, xp] = fill_target;
-            q.emplace(yp, xp);
-        }
-    };
-    while (!q.empty())
-    {
-        const auto [y, x] = q.front();
-        q.pop();
+            const auto valid_y = in_interval(yp, 0, sh - 1);
+            const auto valid_x = in_interval(xp, 0, sw - 1);
+            if (valid_y and valid_x and texels[yp, xp] == fill_origin)
+            {
+                texels[yp, xp] = fill_target;
+                q.emplace(yp, xp);
+            }
+        };
+        while (!q.empty())
+        {
+            const auto [y, x] = q.front();
+            q.pop();
 
-        try_neighbor(y - 1, x);
-        try_neighbor(y + 1, x);
-        try_neighbor(y, x - 1);
-        try_neighbor(y, x + 1);
+            try_neighbor(y - 1, x);
+            try_neighbor(y + 1, x);
+            try_neighbor(y, x - 1);
+            try_neighbor(y, x + 1);
+        }
     }
 
     buf = buf.subspan(pixel_count);
@@ -464,32 +746,39 @@ auto parse_mdl_skins_single(std::span<const std::byte>& buf, const MdlHeader& he
 }
 }  // namespace
 
-auto parse_mdl_skins(std::span<const std::byte>& buf, const MdlHeader& header)
-    -> std::vector<MdlSkinData>
+auto parse_mdl_skins(
+    std::span<const std::byte>& buf, const MdlHeader& header, bool flood_fill = true
+) -> std::vector<MdlSkin>
 {
     const auto num_skins = static_cast<usize>(header.num_skins);
-    std::vector<MdlSkinData> out(num_skins);
+    std::vector<MdlSkin> out(num_skins);
     for (auto skin_idx = 0zu; skin_idx < num_skins; ++skin_idx)
     {
-        const auto type_val = [&]
-        {
-            i32 out{};
-            std::memcpy(&out, buf.data(), sizeof(i32));
-            buf = buf.subspan(sizeof(i32));
-            return MdlSkinType{out};
-        }();
+        const auto type_val = MdlSkinType{read_value<i32>(buf)};
 
         switch (type_val)
         {
             case MdlSkinType::Single:
                 {
-                    out[skin_idx] = parse_mdl_skins_single(buf, header);
+                    out[skin_idx].images.push_back(parse_mdl_skins_single(buf, header, flood_fill));
                 }
                 break;
             case MdlSkinType::Group:
                 {
-                    std::println("Skin Type Group not supported yet");
-                    std::terminate();
+                    const auto group = read_value<MdlSkinGroup>(buf);
+                    const auto group_skins = static_cast<usize>(group.num_skins);
+                    out[skin_idx].intervals.reserve(group_skins);
+                    out[skin_idx].images.reserve(group_skins);
+                    for (auto j = 0zu; j < group_skins; ++j)
+                    {
+                        out[skin_idx].intervals.push_back(read_value<MdlInterval>(buf).interval);
+                    }
+                    for (auto j = 0zu; j < group_skins; ++j)
+                    {
+                        out[skin_idx].images.push_back(
+                            parse_mdl_skins_single(buf, header, flood_fill)
+                        );
+                    }
                 }
                 break;
         }
@@ -501,38 +790,48 @@ auto parse_mdl_frames(std::span<const std::byte>& buf, const MdlHeader& header)
     -> std::vector<MdlFrame>
 {
     const auto num_frames = static_cast<usize>(header.num_frames);
-    std::vector<MdlFrame> out(num_frames);
+    std::vector<MdlFrame> out{};
+    out.reserve(num_frames);
     for (auto i = 0zu; i < num_frames; ++i)
     {
-        const auto type_val = [&]
-        {
-            i32 type_out{};
-            std::memcpy(&type_out, buf.data(), sizeof(i32));
-            buf = buf.subspan(sizeof(i32));
-            return MdlFrameType{type_out};
-        }();
+        const auto type_val = MdlFrameType{read_value<i32>(buf)};
 
         switch (type_val)
         {
             case MdlFrameType::Single:
                 {
-                    std::memcpy(&out[i].bbox_min, buf.data(), sizeof(MdlTriVertex));
-                    buf = buf.subspan(sizeof(MdlTriVertex));
-                    std::memcpy(&out[i].bbox_max, buf.data(), sizeof(MdlTriVertex));
-                    buf = buf.subspan(sizeof(MdlTriVertex));
-                    std::memcpy(out[i].name.data(), buf.data(), 16);
-                    buf = buf.subspan(16);
-
-                    const auto num_verts = static_cast<usize>(header.num_verts);
-                    const auto verts_bytes = num_verts * sizeof(MdlTriVertex);
-                    out[i].vertices.resize(num_verts);
-                    std::memcpy(out[i].vertices.data(), buf.data(), verts_bytes);
-                    buf = buf.subspan(verts_bytes);
+                    MdlFrame frame{};
+                    frame.bbox_min = read_value<MdlTriVertex>(buf);
+                    frame.bbox_max = read_value<MdlTriVertex>(buf);
+                    std::memcpy(frame.name.data(), buf.data(), frame.name.size());
+                    buf = buf.subspan(frame.name.size());
+                    frame.vertices =
+                        read_values<MdlTriVertex>(buf, static_cast<usize>(header.num_verts));
+                    out.push_back(std::move(frame));
                     break;
                 }
             case MdlFrameType::Group:
                 {
-                    std::terminate();
+                    const auto group = read_value<MdlGroup>(buf);
+                    const auto group_frames = static_cast<usize>(group.num_frames);
+                    std::vector<f32> intervals{};
+                    intervals.reserve(group_frames);
+                    for (auto j = 0zu; j < group_frames; ++j)
+                    {
+                        intervals.push_back(read_value<MdlInterval>(buf).interval);
+                    }
+                    for (auto j = 0zu; j < group_frames; ++j)
+                    {
+                        MdlFrame frame{};
+                        frame.bbox_min = read_value<MdlTriVertex>(buf);
+                        frame.bbox_max = read_value<MdlTriVertex>(buf);
+                        std::memcpy(frame.name.data(), buf.data(), frame.name.size());
+                        buf = buf.subspan(frame.name.size());
+                        frame.vertices =
+                            read_values<MdlTriVertex>(buf, static_cast<usize>(header.num_verts));
+                        frame.interval = intervals[j];
+                        out.push_back(std::move(frame));
+                    }
                     break;
                 }
         }
@@ -541,7 +840,7 @@ auto parse_mdl_frames(std::span<const std::byte>& buf, const MdlHeader& header)
 }
 
 auto save_mdl_skins_to_file(
-    const std::vector<MdlSkinData>& skins, const MdlHeader& header, std::string_view name
+    const std::vector<MdlSkin>& skins, const MdlHeader& header, std::string_view name
 ) -> void
 {
     std::error_code ec;
@@ -557,17 +856,98 @@ auto save_mdl_skins_to_file(
         return;
     }
 
-    for (auto i = 0zu; i < skins.size(); ++i)
+    for (auto skin_idx = 0zu; skin_idx < skins.size(); ++skin_idx)
     {
-        const auto output_path =
-            paths::texel_index_output_dir / std::format("{}_skin{}.pgm", name, i);
-        std::ofstream dump{output_path, std::ios::binary};
-        dump << "P5\n" << header.skin_width << " " << header.skin_height << "\n255\n";
-        dump.write(
-            reinterpret_cast<const char*>(skins[i].data()),
-            static_cast<std::streamsize>(skins[i].size())
+        for (auto image_idx = 0zu; image_idx < skins[skin_idx].images.size(); ++image_idx)
+        {
+            const auto output_name =
+                skins[skin_idx].images.size() == 1zu
+                    ? std::format("{}_skin{}.pgm", name, skin_idx)
+                    : std::format("{}_skin{}_pose{}.pgm", name, skin_idx, image_idx);
+            const auto output_path = paths::texel_index_output_dir / output_name;
+            std::ofstream dump{output_path, std::ios::binary};
+            dump << "P5\n" << header.skin_width << " " << header.skin_height << "\n255\n";
+            dump.write(
+                reinterpret_cast<const char*>(skins[skin_idx].images[image_idx].data()),
+                static_cast<std::streamsize>(skins[skin_idx].images[image_idx].size())
+            );
+        }
+    }
+}
+
+auto parse_mdl_binary(const std::filesystem::path& filepath) -> std::optional<MdlBinary>
+{
+    const auto buf_res = load_binary_file(filepath);
+    if (!buf_res)
+    {
+        std::println(stderr, "Failed to load {}.", filepath.filename().string());
+        return std::nullopt;
+    }
+
+    std::span<const std::byte> buf{*buf_res};
+    MdlBinary out{};
+    out.header = parse_mdl_header(buf);
+    if (const auto validity = validate(out.header); validity != MdlHeaderValidity::Valid)
+    {
+        std::println(
+            stderr,
+            "Invalid MDL header in {}: {}",
+            filepath.filename().string(),
+            to_string(validity)
+        );
+        return std::nullopt;
+    }
+
+    out.skins = parse_mdl_skins(buf, out.header);
+    out.stverts = read_values<MdlVertex>(buf, static_cast<usize>(out.header.num_verts));
+    out.triangles = read_values<MdlTriangle>(buf, static_cast<usize>(out.header.num_tris));
+    out.frames = parse_mdl_frames(buf, out.header);
+
+    if (!buf.empty())
+    {
+        std::println(
+            stderr, "{} has {} unparsed trailing bytes", filepath.filename().string(), buf.size()
         );
     }
+    return out;
+}
+
+[[nodiscard]] auto transformed_aabb(const Aabb& aabb, const Transform& transform) -> Aabb
+{
+    const auto matrix = transform.matrix();
+    const auto transform_point = [&](Vec3 point) -> Vec3
+    { return Vec3{matrix * Vec4{point, 1.0f}}; };
+
+    const std::array corners{
+        Vec3{aabb.min.x, aabb.min.y, aabb.min.z},
+        Vec3{aabb.max.x, aabb.min.y, aabb.min.z},
+        Vec3{aabb.min.x, aabb.max.y, aabb.min.z},
+        Vec3{aabb.max.x, aabb.max.y, aabb.min.z},
+        Vec3{aabb.min.x, aabb.min.y, aabb.max.z},
+        Vec3{aabb.max.x, aabb.min.y, aabb.max.z},
+        Vec3{aabb.min.x, aabb.max.y, aabb.max.z},
+        Vec3{aabb.max.x, aabb.max.y, aabb.max.z},
+    };
+
+    Aabb out{
+        .min = Vec3{std::numeric_limits<f32>::max()},
+        .max = Vec3{std::numeric_limits<f32>::lowest()},
+    };
+    for (const auto& corner : corners)
+    {
+        const auto world_corner = transform_point(corner);
+        out.min = glm::min(out.min, world_corner);
+        out.max = glm::max(out.max, world_corner);
+    }
+    return out;
+}
+
+[[nodiscard]] auto merge_aabb(const Aabb& a, const Aabb& b) -> Aabb
+{
+    return Aabb{
+        .min = glm::min(a.min, b.min),
+        .max = glm::max(a.max, b.max),
+    };
 }
 
 }  // namespace ds_vk_quake
@@ -579,7 +959,7 @@ auto main() -> int
 
     const auto mdl_files = [&]
     {
-        std::unordered_map<std::string, fs::path> out{};
+        std::vector<fs::path> out{};
         std::error_code ec{};
         for (const auto& entry : fs::directory_iterator{paths::progs_dir, ec})
         {
@@ -592,76 +972,108 @@ auto main() -> int
             {
                 continue;
             }
-            out[filepath.stem().string()] = filepath;
+            out.push_back(filepath);
         }
+        std::ranges::sort(out);
         return out;
     }();
 
-    const auto suit_it = mdl_files.find("suit");
-    if (suit_it == mdl_files.end())
+    if (mdl_files.empty())
     {
-        std::println(stderr, "Failed to find suit.mdl in {}", paths::progs_dir.string());
+        std::println(stderr, "Failed to find MDL files in {}", paths::progs_dir.string());
         return EXIT_FAILURE;
     }
 
-    const auto& [name, file] = *suit_it;
-    const auto buf_res = load_binary_file(file);
-    if (!buf_res)
+    struct ParsedModel
     {
-        std::println("Failed to load {}.", file.filename().string());
-        return EXIT_FAILURE;
-    }
-    std::span<const std::byte> buf{*buf_res};
-    std::println("Buffer has {} bytes remaining", buf.size());
+        std::string name{};
+        std::vector<MeshData> meshes{};
+        std::vector<Aabb> pose_bounds{};
+        Aabb bounds{};
+        Vec3 extent{};
+        f32 max_extent{};
+        usize source_vertices{};
+        usize source_triangles{};
+        usize source_frames{};
+        usize source_skins{};
+        usize render_vertices{};
+        usize render_triangles{};
+    };
 
-    const auto header = parse_mdl_header(buf);
-    if (const auto validity = validate(header); validity != MdlHeaderValidity::Valid)
+    std::vector<ParsedModel> parsed_models{};
+    parsed_models.reserve(mdl_files.size());
+    const auto dump_texel_indices = std::getenv("DS_VK_QUAKE_DUMP_TEXEL_INDICES") != nullptr;
+    for (const auto& file : mdl_files)
     {
-        std::println(stderr, "Invalid MDL header: {}", to_string(validity));
-        return EXIT_FAILURE;
-    }
-    std::println("Buffer has {} bytes remaining", buf.size());
-    const auto skins = parse_mdl_skins(buf, header);
-    save_mdl_skins_to_file(skins, header, name);
+        const auto name = file.stem().string();
+        auto binary = parse_mdl_binary(file);
+        if (!binary)
+        {
+            continue;
+        }
+        if (dump_texel_indices)
+        {
+            save_mdl_skins_to_file(binary->skins, binary->header, name);
+        }
+        if (binary->frames.empty())
+        {
+            std::println(stderr, "{} has no renderable frames", file.filename().string());
+            continue;
+        }
 
-    std::println("Buffer has {} bytes remaining", buf.size());
-    const auto stverts = [&]
-    {
-        const auto num_verts = static_cast<usize>(header.num_verts);
-        const auto bytes = num_verts * sizeof(MdlVertex);
-        std::vector<MdlVertex> out(num_verts);
-        std::memcpy(out.data(), buf.data(), bytes);
-        buf = buf.subspan(bytes);
-        return out;
-    }();
-    std::println("Buffer has {} bytes remaining", buf.size());
-    const auto triangles = [&]
-    {
-        const auto num_triangles = static_cast<usize>(header.num_tris);
-        const auto bytes = num_triangles * sizeof(MdlTriangle);
-        std::vector<MdlTriangle> out(num_triangles);
-        std::memcpy(out.data(), buf.data(), bytes);
-        buf = buf.subspan(bytes);
-        return out;
-    }();
-    std::println("Buffer has {} bytes remaining", buf.size());
-    const auto frames = parse_mdl_frames(buf, header);
-    std::println("Buffer has {} bytes remaining", buf.size());
-    if (frames.empty())
-    {
-        std::println(stderr, "MDL has no renderable frames");
-        return EXIT_FAILURE;
+        std::vector<MeshData> meshes{};
+        std::vector<Aabb> pose_bounds{};
+        meshes.reserve(binary->frames.size());
+        pose_bounds.reserve(binary->frames.size());
+        for (const auto& mdl_frame : binary->frames)
+        {
+            auto mesh =
+                make_mesh_data(binary->header, binary->stverts, binary->triangles, mdl_frame);
+            if (!mesh)
+            {
+                continue;
+            }
+            pose_bounds.push_back(aabb_of(*mesh));
+            meshes.push_back(std::move(*mesh));
+        }
+        if (meshes.empty())
+        {
+            std::println(stderr, "Failed to convert {} to MeshData", file.filename().string());
+            continue;
+        }
+
+        auto bounds = pose_bounds.front();
+        for (const auto& pose_bound : pose_bounds)
+        {
+            bounds = merge_aabb(bounds, pose_bound);
+        }
+        const auto extent = bounds.max - bounds.min;
+        const auto render_vertices = meshes.front().vertices.size();
+        const auto render_triangles = triangle_count(meshes.front());
+        parsed_models.push_back(
+            ParsedModel{
+                .name = name,
+                .meshes = std::move(meshes),
+                .pose_bounds = std::move(pose_bounds),
+                .bounds = bounds,
+                .extent = extent,
+                .max_extent = std::max({extent.x, extent.y, extent.z}),
+                .source_vertices = static_cast<usize>(binary->header.num_verts),
+                .source_triangles = static_cast<usize>(binary->header.num_tris),
+                .source_frames = binary->frames.size(),
+                .source_skins = binary->skins.size(),
+                .render_vertices = render_vertices,
+                .render_triangles = render_triangles,
+            }
+        );
     }
 
-    auto mesh = make_mesh_data(header, stverts, triangles, frames.front());
-    if (!mesh)
+    if (parsed_models.empty())
     {
-        std::println(stderr, "Failed to convert MDL frame to MeshData");
+        std::println(stderr, "No MDL files could be converted to renderable meshes");
         return EXIT_FAILURE;
     }
-    const auto bounds = aabb_of(*mesh);
-    const auto center = 0.5f * (bounds.min + bounds.max);
-    const auto radius = glm::length(0.5f * (bounds.max - bounds.min));
+    std::println("Loaded {} Quake MDL meshes", parsed_models.size());
 
     RuntimeConfig config{
         .window_title = "ds_vk Quake demo",
@@ -672,109 +1084,372 @@ auto main() -> int
 
     Runtime runtime{std::move(config)};
     runtime.initialize();
+
+    auto background_music =
+        BackgroundMusic::load_looped_ogg(paths::music_dir / "track02.ogg", 0.38f);
+
+    struct RenderModel
+    {
+        std::vector<MeshHandle> meshes{};
+        Transform transform{};
+        Sphere pick_sphere{};
+        ObjectId object_id{};
+        usize parsed_model_index{};
+    };
+    std::vector<RenderModel> render_models{};
+    render_models.reserve(parsed_models.size());
+
+    constexpr auto quake_mesh_scale = 0.1f;
+    constexpr auto model_spacing = 0.75f;
+    constexpr auto row_spacing = 2.2f;
+
+    struct LayoutRow
+    {
+        std::vector<usize> model_indices{};
+        f32 width{};
+        f32 depth{};
+    };
+
+    const auto scaled_width_of = [&](const usize model_idx) -> f32
+    { return std::max(0.35f, parsed_models[model_idx].extent.x * quake_mesh_scale); };
+    const auto scaled_depth_of = [&](const usize model_idx) -> f32
+    { return std::max(0.35f, parsed_models[model_idx].extent.y * quake_mesh_scale); };
+
+    auto append_to_row = [&](LayoutRow& row, usize model_idx) -> void
+    {
+        if (!row.model_indices.empty())
+        {
+            row.width += model_spacing;
+        }
+        row.model_indices.push_back(model_idx);
+        row.width += scaled_width_of(model_idx);
+        row.depth = std::max(row.depth, scaled_depth_of(model_idx));
+    };
+
+    std::vector<usize> model_indices(parsed_models.size());
+    for (auto i = 0zu; i < model_indices.size(); ++i)
+    {
+        model_indices[i] = i;
+    }
+    std::ranges::sort(
+        model_indices,
+        [&](usize a, usize b) { return parsed_models[a].max_extent > parsed_models[b].max_extent; }
+    );
+
+    std::array<LayoutRow, 5> rows{};
+    const auto giant_count = std::min(2zu, model_indices.size());
+    for (auto i = 0zu; i < giant_count; ++i)
+    {
+        append_to_row(rows[i], model_indices[i]);
+    }
+    for (auto i = giant_count; i < model_indices.size(); ++i)
+    {
+        auto target_row = 2zu;
+        for (auto row_idx = 3zu; row_idx < rows.size(); ++row_idx)
+        {
+            if (rows[row_idx].width < rows[target_row].width)
+            {
+                target_row = row_idx;
+            }
+        }
+        append_to_row(rows[target_row], model_indices[i]);
+    }
+
+    auto layout_width = 1.0f;
+    auto layout_depth = 0.0f;
+    for (const auto& row : rows)
+    {
+        if (row.model_indices.empty())
+        {
+            continue;
+        }
+        layout_width = std::max(layout_width, row.width);
+        if (layout_depth > 0.0f)
+        {
+            layout_depth += row_spacing;
+        }
+        layout_depth += row.depth;
+    }
+    layout_depth = std::max(layout_depth, 1.0f);
+
+    auto row_cursor_y = 0.5f * layout_depth;
+    for (const auto& row : rows)
+    {
+        if (row.model_indices.empty())
+        {
+            continue;
+        }
+        const auto row_y = row_cursor_y - 0.5f * row.depth;
+        auto row_cursor_x = -0.5f * row.width;
+        for (const auto model_idx : row.model_indices)
+        {
+            const auto& model = parsed_models[model_idx];
+            const auto local_center = 0.5f * (model.bounds.min + model.bounds.max);
+            const auto scaled_width = scaled_width_of(model_idx);
+            const auto target_center = Vec3{
+                row_cursor_x + 0.5f * scaled_width,
+                row_y,
+                quake_mesh_scale * (local_center.z - model.bounds.min.z),
+            };
+            const auto transform = Transform{
+                .translation =
+                    Vec3{
+                        target_center.x - quake_mesh_scale * local_center.x,
+                        target_center.y - quake_mesh_scale * local_center.y,
+                        -quake_mesh_scale * model.bounds.min.z,
+                    },
+                .scale = Vec3{quake_mesh_scale},
+            };
+            std::vector<MeshHandle> mesh_handles{};
+            mesh_handles.reserve(model.meshes.size());
+            for (const auto& mesh : model.meshes)
+            {
+                mesh_handles.push_back(runtime.upload_mesh(mesh));
+            }
+            render_models.push_back(
+                RenderModel{
+                    .meshes = std::move(mesh_handles),
+                    .transform = transform,
+                    .pick_sphere =
+                        Sphere{
+                            .center = target_center,
+                            .radius = std::max(0.20f, 0.5f * model.max_extent * quake_mesh_scale),
+                        },
+                    .object_id = ObjectId{.value = static_cast<u32>(1000zu + model_idx)},
+                    .parsed_model_index = model_idx,
+                }
+            );
+            row_cursor_x += scaled_width + model_spacing;
+        }
+        row_cursor_y -= row.depth + row_spacing;
+    }
+
+    const auto scene_extent = std::max(layout_width, layout_depth);
     runtime.camera({
-        .pivot = center,
-        .distance = std::max(12.0f, radius * 2.8f),
+        .pivot = Vec3{0.0f, 0.0f, 2.5f},
+        .distance = std::max(18.0f, scene_extent * 0.74f),
         .yaw = glm::radians(42.0f),
-        .pitch = glm::radians(20.0f),
+        .pitch = glm::radians(24.0f),
+        .z_far = 5000.0f,
     });
-    const auto mdl_mesh_handle = runtime.upload_mesh(*mesh);
-    const auto floor_mesh_handle = runtime.upload_mesh(make_quad(80.0f, Color::white));
-    const auto sphere_mesh_handle =
-        runtime.upload_mesh(make_uv_sphere(UvSphereConfig{.radius = 1.0f}));
-    const auto cube_mesh_handle = runtime.upload_mesh(make_cube(2.0f, Color::white));
+
+    const auto floor_mesh_handle =
+        runtime.upload_mesh(make_quad(std::max(24.0f, scene_extent + 8.0f), Color::white));
 
     const Material mdl_material{
         .base_color = Color{0.72f, 0.64f, 0.48f, 1.0f},
         .roughness = 0.92f,
     };
+    const Material selected_mdl_material{
+        .base_color = Color{1.0f, 0.46f, 0.08f, 1.0f},
+        .emissive_color = Color{1.0f, 0.32f, 0.04f, 1.0f},
+        .roughness = 0.62f,
+    };
     const Material floor_material{
         .base_color = Color{0.48f, 0.52f, 0.48f, 1.0f},
         .roughness = 0.88f,
     };
-    const Material sphere_material{
-        .base_color = Color{0.18f, 0.52f, 0.95f, 1.0f},
-        .roughness = 0.34f,
-    };
-    const Material cube_material{
-        .base_color = Color{0.9f, 0.46f, 0.2f, 1.0f},
-        .roughness = 0.62f,
-    };
-
     const EnvironmentConfig environment{
-        .lighting_intensity = 0.32f,
+        .lighting_intensity = 0.10f,
         .background_intensity = 0.75f,
         .rotation_radians = glm::radians(22.0f),
         .visible_to_camera = true,
     };
     const Color ambient_light{0.030f, 0.036f, 0.046f, 1.0f};
-    const DirectionalLightConfig sun{
-        .direction = {-0.42f, -0.34f, -0.84f},
+    const auto shadow_extent = std::max(12.0f, scene_extent * 0.62f);
+    const DirectionalLightConfig front_sun{
+        .direction = normalize_or(Vec3{0.08f, -0.58f, -1.0f}, -k_axis_z),
         .color = {1.0f, 0.94f, 0.84f, 1.0f},
-        .intensity = 2.45f,
+        .intensity = 3.1f,
         .shadow = LightShadowConfig{
             .enabled = true,
             .bias = 0.0040f,
             .strength = 0.78f,
             .near_plane = 0.05f,
-            .far_plane = 24.0f,
-            .ortho_extent = 5.2f,
+            .far_plane = 80.0f,
+            .ortho_extent = shadow_extent,
         },
     };
-    const RadialLightConfig radial_light{
-        .position = {-2.2f, -1.3f, 1.55f},
-        .color = {0.24f, 0.78f, 1.0f, 1.0f},
-        .intensity = 18.0f,
-        .range = 5.0f,
+    const DirectionalLightConfig back_sun{
+        .direction = normalize_or(Vec3{-0.35f, 0.42f, -0.82f}, -k_axis_z),
+        .color = {0.56f, 0.72f, 1.0f, 1.0f},
+        .intensity = 1.7f,
+        .shadow = LightShadowConfig{
+            .enabled = true,
+            .bias = 0.0045f,
+            .strength = 0.45f,
+            .near_plane = 0.05f,
+            .far_plane = 80.0f,
+            .ortho_extent = shadow_extent,
+        },
     };
-    const SpotLightConfig spot_light{
-        .position = {2.4f, -2.2f, 2.65f},
-        .direction = {-0.62f, 0.48f, -0.62f},
-        .color = {1.0f, 0.44f, 0.22f, 1.0f},
-        .intensity = 32.0f,
-        .range = 7.0f,
-        .inner_cone_angle = glm::radians(10.0f),
-        .outer_cone_angle = glm::radians(24.0f),
-    };
+
+    Picker picker{};
+    auto selected_render_model = k_invalid_index;
+    auto selection_window_open = false;
+    constexpr auto animation_step_seconds = 0.1f;
+    auto animation_accumulator_seconds = 0.0f;
+    auto animation_step = 0zu;
 
     while (auto* frame = runtime.begin_frame())
     {
+        if (background_music)
+        {
+            background_music->pump();
+        }
+        animation_accumulator_seconds += frame->dt_seconds;
+        while (animation_accumulator_seconds >= animation_step_seconds)
+        {
+            animation_accumulator_seconds -= animation_step_seconds;
+            ++animation_step;
+        }
+
+        picker.clear();
+        for (auto i = 0zu; i < render_models.size(); ++i)
+        {
+            (void) picker.add_sphere({
+                .object_id = render_models[i].object_id,
+                .sub_index = static_cast<u32>(i),
+                .sphere = render_models[i].pick_sphere,
+            });
+        }
+        if (frame->input.left_click.occurred)
+        {
+            const auto hit = picker.click({
+                .camera = frame->camera,
+                .mouse_px = frame->input.left_click.position_px,
+                .viewport_px = Vec2{
+                    static_cast<f32>(frame->extent.width),
+                    static_cast<f32>(frame->extent.height),
+                },
+            });
+            if (hit.has_value() and static_cast<usize>(hit->sub_index) < render_models.size())
+            {
+                selected_render_model = static_cast<usize>(hit->sub_index);
+                selection_window_open = true;
+            }
+            else
+            {
+                selected_render_model = k_invalid_index;
+                selection_window_open = false;
+            }
+        }
+
         frame->draw.set_ambient_light(ambient_light);
         frame->draw.set_environment(environment);
-        frame->draw.directional_light(sun);
-        frame->draw.radial_light(radial_light);
-        frame->draw.spot_light(spot_light);
+        frame->draw.directional_light(front_sun);
+        frame->draw.directional_light(back_sun);
+
+        const auto pose_index_for = [&](const RenderModel& render_model) -> usize
+        {
+            if (render_model.meshes.size() <= 1zu)
+            {
+                return 0zu;
+            }
+            return animation_step % render_model.meshes.size();
+        };
 
         frame->draw.draw_mesh({
             .mesh = floor_mesh_handle,
             .material = floor_material,
             .mask = {.shadow_producer = false},
         });
-        frame->draw.draw_mesh({
-            .mesh = mdl_mesh_handle,
-            .material = mdl_material,
-        });
-        frame->draw.draw_mesh({
-            .mesh = sphere_mesh_handle,
-            .transform =
-                Transform{
-                    .translation = center + Vec3{8.0f, -7.0f, 2.0f},
-                    .scale = Vec3{2.0f},
-                },
-            .material = sphere_material,
-        });
-        frame->draw.draw_mesh({
-            .mesh = cube_mesh_handle,
-            .transform =
-                Transform{
-                    .translation = center + Vec3{-9.0f, 6.0f, 1.0f},
-                    .rotation = glm::angleAxis(glm::radians(24.0f), k_axis_z),
-                },
-            .material = cube_material,
-        });
+        for (auto i = 0zu; i < render_models.size(); ++i)
+        {
+            const auto selected = i == selected_render_model;
+            const auto& render_model = render_models[i];
+            const auto pose_index = pose_index_for(render_model);
+            frame->draw.draw_mesh({
+                .mesh = render_model.meshes[pose_index],
+                .transform = render_model.transform,
+                .material = selected ? selected_mdl_material : mdl_material,
+                .debug =
+                    selected
+                        ? MeshDebugConfig{
+                              .mode = MeshDebugMode::selected_pulse,
+                              .color = Color{1.0f, 0.42f, 0.04f, 0.92f},
+                              .selected = true,
+                          }
+                        : MeshDebugConfig{},
+            });
+            if (selected)
+            {
+                const auto& model = parsed_models[render_model.parsed_model_index];
+                (void) viz::draw_aabb(
+                    frame->draw,
+                    viz::AabbMarkerConfig{
+                        .aabb =
+                            transformed_aabb(model.pose_bounds[pose_index], render_model.transform),
+                        .color = Color{1.0f, 0.58f, 0.05f, 0.95f},
+                        .width = 0.050f,
+                        .draw_on_top = true,
+                    }
+                );
+            }
+        }
         if (runtime.ui_visible())
         {
             runtime.draw_runtime_ui();
+            if (selection_window_open and selected_render_model != k_invalid_index
+                and selected_render_model < render_models.size())
+            {
+                const auto& render_model = render_models[selected_render_model];
+                const auto& model = parsed_models[render_model.parsed_model_index];
+                const auto pose_index = pose_index_for(render_model);
+                auto open = selection_window_open;
+                ImGui::SetNextWindowPos(ImVec2{24.0f, 72.0f}, ImGuiCond_Once);
+                ImGui::SetNextWindowSize(ImVec2{360.0f, 250.0f}, ImGuiCond_Once);
+                if (ImGui::Begin("MDL Mesh", &open))
+                {
+                    ImGui::Text("Name: %s", model.name.c_str());
+                    ImGui::Separator();
+                    ImGui::Text("Source verts: %zu", model.source_vertices);
+                    ImGui::Text("Source tris: %zu", model.source_triangles);
+                    ImGui::Text("Frames/poses: %zu", model.source_frames);
+                    ImGui::Text("Current pose: %zu / %zu", pose_index + 1zu, model.meshes.size());
+                    ImGui::Text("Step time: %.2fs", static_cast<f64>(animation_step_seconds));
+                    ImGui::Text("Skins: %zu", model.source_skins);
+                    ImGui::Text("Render verts: %zu", model.render_vertices);
+                    ImGui::Text("Render tris: %zu", model.render_triangles);
+                    ImGui::Separator();
+                    ImGui::Text(
+                        "Bounds min: %.2f %.2f %.2f",
+                        static_cast<f64>(model.bounds.min.x),
+                        static_cast<f64>(model.bounds.min.y),
+                        static_cast<f64>(model.bounds.min.z)
+                    );
+                    ImGui::Text(
+                        "Bounds max: %.2f %.2f %.2f",
+                        static_cast<f64>(model.bounds.max.x),
+                        static_cast<f64>(model.bounds.max.y),
+                        static_cast<f64>(model.bounds.max.z)
+                    );
+                    ImGui::Text(
+                        "Extent: %.2f %.2f %.2f",
+                        static_cast<f64>(model.extent.x),
+                        static_cast<f64>(model.extent.y),
+                        static_cast<f64>(model.extent.z)
+                    );
+                    ImGui::Text("Display scale: %.2f", static_cast<f64>(quake_mesh_scale));
+                    ImGui::Text(
+                        "Pick sphere: center %.2f %.2f %.2f, r %.2f",
+                        static_cast<f64>(render_model.pick_sphere.center.x),
+                        static_cast<f64>(render_model.pick_sphere.center.y),
+                        static_cast<f64>(render_model.pick_sphere.center.z),
+                        static_cast<f64>(render_model.pick_sphere.radius)
+                    );
+                    if (ImGui::Button("Clear selection"))
+                    {
+                        open = false;
+                    }
+                }
+                ImGui::End();
+                selection_window_open = open;
+                if (!selection_window_open)
+                {
+                    selected_render_model = k_invalid_index;
+                }
+            }
         }
         runtime.render_shadow_pass();
         runtime.begin_main_pass();

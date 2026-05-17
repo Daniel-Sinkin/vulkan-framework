@@ -143,6 +143,9 @@ if(DS_VK_USE_SYSTEM_VULKAN)
 endif()
 
 if(DS_VK_BUILD_APP AND Vulkan_FOUND)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(DS_VK_VORBISFILE REQUIRED IMPORTED_TARGET vorbisfile)
+
   if(APPLE)
     find_library(DS_VK_ZLIB_LIBRARY z REQUIRED)
   else()
@@ -287,6 +290,7 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     ds_vk
     ds_vk_viz
     ds_vk_picker
+    PkgConfig::DS_VK_VORBISFILE
     ds_vk_warnings
   )
   ds_vk_enable_pch(ds_vk_quake_app)

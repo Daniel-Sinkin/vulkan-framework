@@ -624,76 +624,76 @@ auto DrawList::set_ambient_light(Color color) -> void
     ambient_light_ = color;
 }
 
-auto DrawList::draw_mesh(const MeshDrawConfig& config) -> void
+auto DrawList::draw_mesh(const MeshDrawConfig& cfg) -> void
 {
-    if (!config.mesh.valid() or config.debug.hidden
-        or (!config.mask.visible_to_camera and !config.mask.shadow_producer))
+    if (!cfg.mesh.valid() or cfg.debug.hidden
+        or (!cfg.mask.visible_to_camera and !cfg.mask.shadow_producer))
     {
         return;
     }
     mesh_commands_.push_back(
         MeshDrawCommand{
-            .mesh = config.mesh,
-            .object_id = config.object_id,
-            .transform = config.transform,
-            .material = config.material,
-            .mask = config.mask,
-            .debug = config.debug,
+            .mesh = cfg.mesh,
+            .object_id = cfg.object_id,
+            .transform = cfg.transform,
+            .material = cfg.material,
+            .mask = cfg.mask,
+            .debug = cfg.debug,
         }
     );
 }
 
-auto DrawList::draw_basic_mesh(const BasicMeshDrawConfig& config) -> void
+auto DrawList::draw_basic_mesh(const BasicMeshDrawConfig& cfg) -> void
 {
     draw_mesh(
         MeshDrawConfig{
-            .mesh = config.mesh,
-            .object_id = config.object_id,
-            .transform = config.transform,
-            .material = Material{.base_color = config.color},
-            .mask = config.mask,
-            .debug = config.debug,
+            .mesh = cfg.mesh,
+            .object_id = cfg.object_id,
+            .transform = cfg.transform,
+            .material = Material{.base_color = cfg.color},
+            .mask = cfg.mask,
+            .debug = cfg.debug,
         }
     );
 }
 
-auto DrawList::debug_line(const DebugLineConfig& config) -> void
+auto DrawList::debug_line(const DebugLineConfig& cfg) -> void
 {
-    auto& segments = config.draw_on_top ? debug_on_top_segments_ : debug_segments_;
+    auto& segments = cfg.draw_on_top ? debug_on_top_segments_ : debug_segments_;
     segments.push_back(
         DebugSegment{
-            .start = config.start,
-            .width = config.width,
-            .end = config.end,
+            .start = cfg.start,
+            .width = cfg.width,
+            .end = cfg.end,
             .arrow_tip = 0.0f,
-            .color = config.color,
+            .color = cfg.color,
         }
     );
 }
 
-auto DrawList::debug_arrow(const DebugArrowConfig& config) -> void
+auto DrawList::debug_arrow(const DebugArrowConfig& cfg) -> void
 {
-    auto& segments = config.draw_on_top ? debug_on_top_segments_ : debug_segments_;
+    auto& segments = cfg.draw_on_top ? debug_on_top_segments_ : debug_segments_;
     segments.push_back(
         DebugSegment{
-            .start = config.origin,
-            .width = config.width,
-            .end = config.origin + config.vector,
+            .start = cfg.origin,
+            .width = cfg.width,
+            .end = cfg.origin + cfg.vector,
             .arrow_tip = 1.0f,
-            .color = config.color,
+            .color = cfg.color,
         }
     );
 }
 
-auto DrawList::debug_sphere(const DebugSphereConfig& config) -> void
+auto DrawList::debug_sphere(const DebugSphereConfig& cfg) -> void
 {
-    const auto safe_radius = std::max(0.0f, config.radius);
+    const auto safe_radius = std::max(0.0f, cfg.radius);
     if (safe_radius <= 0.0f)
     {
         return;
     }
 
-    const auto safe_segments = std::max(8u, config.segments);
+    const auto safe_segments = std::max(8u, cfg.segments);
     const auto safe_segments_f = static_cast<f32>(safe_segments);
     for (auto i = 0u; i < safe_segments; ++i)
     {
@@ -706,92 +706,92 @@ auto DrawList::debug_sphere(const DebugSphereConfig& config) -> void
         const auto s1 = std::sin(t1) * safe_radius;
         debug_line(
             DebugLineConfig{
-                .start = config.center + Vec3{c0, s0, 0.0f},
-                .end = config.center + Vec3{c1, s1, 0.0f},
-                .color = config.color,
-                .width = config.width,
-                .draw_on_top = config.draw_on_top,
+                .start = cfg.center + Vec3{c0, s0, 0.0f},
+                .end = cfg.center + Vec3{c1, s1, 0.0f},
+                .color = cfg.color,
+                .width = cfg.width,
+                .draw_on_top = cfg.draw_on_top,
             }
         );
         debug_line(
             DebugLineConfig{
-                .start = config.center + Vec3{c0, 0.0f, s0},
-                .end = config.center + Vec3{c1, 0.0f, s1},
-                .color = config.color,
-                .width = config.width,
-                .draw_on_top = config.draw_on_top,
+                .start = cfg.center + Vec3{c0, 0.0f, s0},
+                .end = cfg.center + Vec3{c1, 0.0f, s1},
+                .color = cfg.color,
+                .width = cfg.width,
+                .draw_on_top = cfg.draw_on_top,
             }
         );
         debug_line(
             DebugLineConfig{
-                .start = config.center + Vec3{0.0f, c0, s0},
-                .end = config.center + Vec3{0.0f, c1, s1},
-                .color = config.color,
-                .width = config.width,
-                .draw_on_top = config.draw_on_top,
+                .start = cfg.center + Vec3{0.0f, c0, s0},
+                .end = cfg.center + Vec3{0.0f, c1, s1},
+                .color = cfg.color,
+                .width = cfg.width,
+                .draw_on_top = cfg.draw_on_top,
             }
         );
     }
 }
 
-auto DrawList::add_light(const LightConfig& config) -> void
+auto DrawList::add_light(const LightConfig& cfg) -> void
 {
-    if (!config.enabled)
+    if (!cfg.enabled)
     {
         return;
     }
-    lights_.push_back(config);
+    lights_.push_back(cfg);
 }
 
-auto DrawList::directional_light(const DirectionalLightConfig& config) -> void
+auto DrawList::directional_light(const DirectionalLightConfig& cfg) -> void
 {
     add_light(
         LightConfig{
             .type = LightType::directional,
-            .direction = config.direction,
-            .color = config.color,
-            .intensity = config.intensity,
-            .shadow = config.shadow,
-            .enabled = config.enabled,
+            .direction = cfg.direction,
+            .color = cfg.color,
+            .intensity = cfg.intensity,
+            .shadow = cfg.shadow,
+            .enabled = cfg.enabled,
         }
     );
 }
 
-auto DrawList::radial_light(const RadialLightConfig& config) -> void
+auto DrawList::radial_light(const RadialLightConfig& cfg) -> void
 {
     add_light(
         LightConfig{
             .type = LightType::radial,
-            .position = config.position,
-            .color = config.color,
-            .intensity = config.intensity,
-            .range = config.range,
-            .enabled = config.enabled,
+            .position = cfg.position,
+            .color = cfg.color,
+            .intensity = cfg.intensity,
+            .range = cfg.range,
+            .enabled = cfg.enabled,
         }
     );
 }
 
-auto DrawList::spot_light(const SpotLightConfig& config) -> void
+auto DrawList::spot_light(const SpotLightConfig& cfg) -> void
 {
     add_light(
         LightConfig{
             .type = LightType::spot,
-            .position = config.position,
-            .direction = config.direction,
-            .color = config.color,
-            .intensity = config.intensity,
-            .range = config.range,
-            .inner_cone_angle = config.inner_cone_angle,
-            .outer_cone_angle = config.outer_cone_angle,
-            .shadow = config.shadow,
-            .enabled = config.enabled,
+            .position = cfg.position,
+            .direction = cfg.direction,
+            .color = cfg.color,
+            .intensity = cfg.intensity,
+            .range = cfg.range,
+            .inner_cone_angle = cfg.inner_cone_angle,
+            .outer_cone_angle = cfg.outer_cone_angle,
+            .shadow = cfg.shadow,
+            .enabled = cfg.enabled,
         }
     );
 }
 
-auto DrawList::set_environment(const EnvironmentConfig& config) -> void
+auto DrawList::set_environment(const EnvironmentConfig& cfg) -> void
 {
-    environment_ = config;
+    environment_ = cfg;
 }
 
 auto DrawList::mesh_commands() const noexcept -> std::span<const MeshDrawCommand>
@@ -829,7 +829,7 @@ auto DrawList::environment() const noexcept -> const EnvironmentConfig&
 
 struct Runtime::Impl
 {
-    explicit Impl(RuntimeConfig config_in) : config(std::move(config_in))
+    explicit Impl(RuntimeConfig cfg) : config(std::move(cfg))
     {
     }
 
@@ -965,8 +965,7 @@ struct Runtime::Impl
     auto reserve_mesh_capacity(const MeshReserveConfig& cfg) -> MeshHandle;
     auto update_mesh(MeshHandle handle, const MeshData& mesh, const MeshUpdateConfig& cfg)
         -> MeshHandle;
-    auto
-    update_mesh(MeshHandle handle, const PositionNormalMeshData& mesh, const MeshUpdateConfig& cfg)
+    auto update_mesh(MeshHandle, const PositionNormalMeshData&, const MeshUpdateConfig&)
         -> MeshHandle;
     auto update_mesh(
         MeshHandle handle, const QuantizedPositionNormalMeshData& mesh, const MeshUpdateConfig& cfg
@@ -4846,10 +4845,10 @@ auto Runtime::update_mesh(
     return impl_->update_mesh(handle, mesh, cfg);
 }
 
-auto Runtime::load_texture(const std::filesystem::path& path, const TextureLoadConfig& config)
+auto Runtime::load_texture(const std::filesystem::path& path, const TextureLoadConfig& cfg)
     -> TextureHandle
 {
-    return impl_->load_texture(path, config);
+    return impl_->load_texture(path, cfg);
 }
 
 auto Runtime::load_hdr_texture(

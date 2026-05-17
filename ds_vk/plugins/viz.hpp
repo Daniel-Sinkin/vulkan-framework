@@ -95,6 +95,7 @@ struct AabbMarkerConfig
     Aabb aabb{};
     Color color{0.42f, 0.70f, 0.88f, 0.55f};
     f32 width{0.006f};
+    bool draw_on_top{};
 };
 
 template <typename DrawSink>
@@ -211,6 +212,7 @@ auto draw_aabb(DrawSink& draw, const AabbMarkerConfig& config) -> usize
                 .end = end,
                 .color = config.color,
                 .width = config.width,
+                .draw_on_top = config.draw_on_top,
             }
         );
     };
