@@ -25,13 +25,18 @@ vec3 safe_normalize(vec3 value, vec3 fallback)
     return value * inversesqrt(len2);
 }
 
-vec3 quad_vertex(vec3 a, vec3 b, float width, int local_vertex)
+vec3 segment_side(vec3 a, vec3 b, float width)
 {
     vec3 segment = b - a;
     vec3 direction = safe_normalize(segment, vec3(1.0, 0.0, 0.0));
     vec3 midpoint = 0.5 * (a + b);
     vec3 to_camera = safe_normalize(pc.camera_position.xyz - midpoint, vec3(0.0, 0.0, 1.0));
-    vec3 side = safe_normalize(cross(direction, to_camera), pc.camera_right.xyz) * (0.5 * width);
+    return safe_normalize(cross(direction, to_camera), pc.camera_right.xyz) * (0.5 * width);
+}
+
+vec3 quad_vertex(vec3 a, vec3 b, float width, int local_vertex)
+{
+    vec3 side = segment_side(a, b, width);
 
     if (local_vertex == 0) { return a - side; }
     if (local_vertex == 1) { return b - side; }
@@ -45,38 +50,48 @@ void main()
 {
     vec3 segment = in_end - in_start;
     float segment_length = length(segment);
-    if (segment_length < 1.0e-6)
+    if (segment_length < 1.0e-6 || in_width <= 0.0)
     {
         gl_Position = pc.view_projection * vec4(in_start, 1.0);
         out_color = in_color;
         return;
     }
 
-    int part = gl_VertexIndex / 6;
-    int local_vertex = gl_VertexIndex - part * 6;
-    vec3 a = in_start;
-    vec3 b = in_end;
-
-    if (part > 0)
+    vec3 position = in_end;
+    if (in_arrow_tip < 0.5)
     {
-        if (in_arrow_tip < 0.5)
+        if (gl_VertexIndex < 6)
         {
-            a = in_end;
-            b = in_end;
+            position = quad_vertex(in_start, in_end, in_width, gl_VertexIndex);
         }
-        else
-        {
-            vec3 direction = segment / segment_length;
-            vec3 to_camera = safe_normalize(pc.camera_position.xyz - in_end, vec3(0.0, 0.0, 1.0));
-            vec3 side = safe_normalize(cross(direction, to_camera), pc.camera_right.xyz);
-            float head_length = clamp(segment_length * 0.38, in_width * 2.0, in_width * 7.0);
-            float head_half_width = max(in_width * 2.2, head_length * 0.42);
-            vec3 base = in_end - direction * min(head_length, segment_length * 0.85);
-            a = in_end;
-            b = base + (part == 1 ? side : -side) * head_half_width;
-        }
+        gl_Position = pc.view_projection * vec4(position, 1.0);
+        out_color = in_color;
+        return;
     }
 
-    gl_Position = pc.view_projection * vec4(quad_vertex(a, b, in_width, local_vertex), 1.0);
+    vec3 direction = segment / segment_length;
+    float head_length = clamp(segment_length * 0.30, in_width * 3.0, in_width * 7.0);
+    vec3 head_base = in_end - direction * head_length;
+    float head_half_width = max(in_width * 2.2, head_length * 0.42);
+    vec3 head_side = normalize(segment_side(head_base, in_end, 2.0 * head_half_width));
+
+    if (gl_VertexIndex < 6)
+    {
+        position = quad_vertex(in_start, head_base, in_width, gl_VertexIndex);
+    }
+    else if (gl_VertexIndex == 6)
+    {
+        position = in_end;
+    }
+    else if (gl_VertexIndex == 7)
+    {
+        position = head_base + head_side * head_half_width;
+    }
+    else
+    {
+        position = head_base - head_side * head_half_width;
+    }
+
+    gl_Position = pc.view_projection * vec4(position, 1.0);
     out_color = in_color;
 }

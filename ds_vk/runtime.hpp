@@ -54,6 +54,9 @@ enum class MeshDebugMode : u8
     object_id = 5,
     camera_depth = 6,
     triangle_selected_pulse = 7,
+    world_z_ramp = 8,
+    facet_color = 9,
+    angle_shaded = 10,
 };
 
 struct MeshDebugConfig
@@ -141,6 +144,9 @@ struct EnvironmentConfig
     f32 lighting_intensity{0.0f};
     f32 background_intensity{0.0f};
     f32 rotation_radians{};
+    Color background_color{0.14f, 0.16f, 0.18f, 0.0f};
+    Color background_top_color{0.36f, 0.43f, 0.48f, 0.0f};
+    bool gradient_background{};
     bool visible_to_camera{true};
 };
 

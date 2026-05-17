@@ -41,6 +41,8 @@ constexpr VkImageUsageFlags k_swapchain_image_usage{
 constexpr usize k_max_material_textures{15zu};
 constexpr usize k_max_lights{16zu};
 constexpr u32 k_default_texture_index{0u};
+constexpr u32 k_debug_segment_vertex_count{9u};
+constexpr f32 k_debug_arrow_min_length_widths{8.0f};
 
 struct Buffer
 {
@@ -220,6 +222,8 @@ struct EnvironmentPushConstants
     Mat4 inverse_view_projection{1.0f};
     Vec4 camera_position{0.0f, 0.0f, 0.0f, 1.0f};
     Vec4 params{};
+    Vec4 background_color{};
+    Vec4 background_top_color{};
 };
 
 // clang-format off
@@ -240,7 +244,7 @@ static_assert(offsetof(GpuMaterial, camera_forward)        == 144zu);
 static_assert(sizeof(GpuLight)                             == 64zu);
 static_assert(sizeof(GpuLighting)                          == 112zu + k_max_lights * sizeof(GpuLight));
 static_assert(sizeof(DebugPushConstants)                   == 96zu);
-static_assert(sizeof(EnvironmentPushConstants)             == 96zu);
+static_assert(sizeof(EnvironmentPushConstants)             == 128zu);
 // clang-format on
 constexpr auto k_required_push_constant_bytes = std::max(
     {sizeof(MeshPushConstants), sizeof(DebugPushConstants), sizeof(EnvironmentPushConstants)}
@@ -719,11 +723,18 @@ auto DrawList::debug_line(const DebugLineConfig& cfg) -> void
 
 auto DrawList::debug_arrow(const DebugArrowConfig& cfg) -> void
 {
+    const auto safe_width = std::max(0.0f, cfg.width);
+    const auto min_length = std::max(1.0e-6f, k_debug_arrow_min_length_widths * safe_width);
+    if (glm::dot(cfg.vector, cfg.vector) < min_length * min_length)
+    {
+        return;
+    }
+
     auto& segments = cfg.draw_on_top ? debug_on_top_segments_ : debug_segments_;
     segments.push_back(
         DebugSegment{
             .start = cfg.origin,
-            .width = cfg.width,
+            .width = safe_width,
             .end = cfg.origin + cfg.vector,
             .arrow_tip = 1.0f,
             .color = cfg.color,
@@ -3590,23 +3601,30 @@ auto Runtime::Impl::draw_environment(
 ) -> void
 {
     const auto& environment = draw_list.environment();
-    if (!environment.texture.valid() or !environment.visible_to_camera
-        or static_cast<usize>(environment.texture.id) >= k_max_material_textures
-        or environment.background_intensity <= 0.0f or environment_pipeline == VK_NULL_HANDLE)
+    const auto show_hdri = environment.texture.valid() and environment.visible_to_camera
+                           and static_cast<usize>(environment.texture.id) < k_max_material_textures
+                           and environment.background_intensity > 0.0f;
+    const auto show_color_background =
+        environment.visible_to_camera and environment.background_color.a() > 0.0f;
+    if ((!show_hdri and !show_color_background) or environment_pipeline == VK_NULL_HANDLE)
     {
         return;
     }
+    const auto environment_mode =
+        show_hdri ? 0.0f : (environment.gradient_background ? 2.0f : 1.0f);
     const auto aspect = static_cast<f32>(std::max(1u, extent.width))
                         / static_cast<f32>(std::max(1u, extent.height));
     const EnvironmentPushConstants push{
         .inverse_view_projection = glm::inverse(camera.view_projection_matrix(aspect)),
         .camera_position = Vec4{camera.position(), 1.0f},
         .params = Vec4{
-            environment.background_intensity,
+            show_hdri ? environment.background_intensity : 1.0f,
             environment.rotation_radians,
-            static_cast<f32>(environment.texture.id),
-            0.0f,
+            show_hdri ? static_cast<f32>(environment.texture.id) : 0.0f,
+            environment_mode,
         },
+        .background_color = to_vec4(environment.background_color),
+        .background_top_color = to_vec4(environment.background_top_color),
     };
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, environment_pipeline);
     vkCmdBindDescriptorSets(
@@ -3828,7 +3846,9 @@ auto Runtime::Impl::draw_debug_segments(
     vkCmdPushConstants(
         command_buffer, debug_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push
     );
-    vkCmdDraw(command_buffer, 18u, static_cast<u32>(segments.size()), 0, 0);
+    vkCmdDraw(
+        command_buffer, k_debug_segment_vertex_count, static_cast<u32>(segments.size()), 0, 0
+    );
 }
 
 auto Runtime::Impl::draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index)

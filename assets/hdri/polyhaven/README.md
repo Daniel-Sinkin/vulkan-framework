@@ -7,7 +7,10 @@ pages.
 
 - `studio_small_01_1k.hdr`: 1K HDR environment from
   <https://polyhaven.com/a/studio_small_01>
+- `qwantani_puresky_1k.hdr`: local-only 1K HDR sky environment from
+  <https://polyhaven.com/a/qwantani_puresky>, used by the DFSPH viewer. This
+  file is ignored by git; download it from Poly Haven when recreating local
+  assets.
 
-The first environment-lighting pass consumes this as an equirectangular HDR
-texture for both visible background rendering and approximate shader-side image
-based lighting.
+The runtime consumes these as equirectangular HDR textures for both visible
+background rendering and approximate shader-side image based lighting.

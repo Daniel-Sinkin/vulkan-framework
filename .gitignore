@@ -83,6 +83,11 @@ assets/dfsph/**/*.mesh.gz
 assets/dfsph/**/*.bin
 assets/dfsph/**/*.bin.gz
 
+# Local HDRI look-dev assets. Keep the tiny tracked smoke-test studio HDRI, but
+# do not stage extra downloaded environments by default.
+assets/hdri/polyhaven/*.hdr
+!assets/hdri/polyhaven/studio_small_01_1k.hdr
+
 # Local Quake source data cache.
 app/quake/assets/
 app/quake/outputs/

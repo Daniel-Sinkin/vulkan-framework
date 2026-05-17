@@ -5,6 +5,7 @@ layout(location = 1) in vec4 in_color;
 layout(location = 2) flat in uint in_material_index;
 layout(location = 3) in vec3 in_world_position;
 layout(location = 4) in vec2 in_texcoord;
+layout(location = 5) flat in vec3 in_facet_seed;
 
 layout(location = 0) out vec4 out_color;
 
@@ -62,6 +63,9 @@ const uint DEBUG_NORMAL = 4;
 const uint DEBUG_OBJECT_ID = 5;
 const uint DEBUG_CAMERA_DEPTH = 6;
 const uint DEBUG_TRIANGLE_SELECTED_PULSE = 7;
+const uint DEBUG_WORLD_Z_RAMP = 8;
+const uint DEBUG_FACET_COLOR = 9;
+const uint DEBUG_ANGLE_SHADED = 10;
 const uint LIGHT_DIRECTIONAL = 0;
 const uint LIGHT_RADIAL = 1;
 const uint LIGHT_SPOT = 2;
@@ -141,6 +145,53 @@ vec3 heatmap(float value)
         return mix(cyan, yellow, (t - 0.33) / 0.33);
     }
     return mix(yellow, red, (t - 0.66) / 0.34);
+}
+
+vec3 mesh_height_ramp(float value)
+{
+    float t = clamp(value, 0.0, 1.0);
+    vec3 low = vec3(0.015, 0.055, 0.085);
+    vec3 mid = vec3(0.045, 0.56, 0.78);
+    vec3 high = vec3(0.86, 0.98, 1.0);
+    return t < 0.68 ? mix(low, mid, t / 0.68) : mix(mid, high, (t - 0.68) / 0.32);
+}
+
+uint hash_u32(uint value)
+{
+    value ^= value >> 16u;
+    value *= 2246822519u;
+    value ^= value >> 13u;
+    value *= 3266489917u;
+    value ^= value >> 16u;
+    return value;
+}
+
+float hash01(uint value)
+{
+    return float(hash_u32(value) & 16777215u) / 16777215.0;
+}
+
+vec3 facet_color(vec3 seed)
+{
+    uvec3 bits = floatBitsToUint(seed);
+    uint h = hash_u32(bits.x ^ hash_u32(bits.y + 1013904223u) ^ hash_u32(bits.z + 1664525u));
+    vec3 deep = vec3(0.025, 0.23, 0.34);
+    vec3 blue = vec3(0.02, 0.52, 0.75);
+    vec3 foam = vec3(0.72, 0.94, 0.98);
+    float t = hash01(h);
+    vec3 color = t < 0.72 ? mix(deep, blue, t / 0.72) : mix(blue, foam, (t - 0.72) / 0.28);
+    return color * (0.82 + 0.28 * hash01(h + 747796405u));
+}
+
+vec3 angle_shaded_surface(vec3 normal, vec3 view)
+{
+    float facing = pow(max(dot(normal, view), 0.0), 0.55);
+    float upward = clamp(normal.z * 0.5 + 0.5, 0.0, 1.0);
+    vec3 low = vec3(0.025, 0.22, 0.30);
+    vec3 high = vec3(0.18, 0.70, 0.84);
+    vec3 base = mix(low, high, upward);
+    vec3 rim = vec3(0.72, 0.95, 1.0) * pow(1.0 - facing, 2.4) * 0.45;
+    return base * (0.44 + 0.68 * facing) + rim;
 }
 
 vec3 object_id_color(uint object_id)
@@ -335,6 +386,22 @@ vec3 apply_debug(vec3 shaded_color, vec3 normal, Material material)
         float depth = smoothstep(near_depth, far_depth, camera_depth);
         result = vec3(depth);
     }
+    else if (mode == DEBUG_WORLD_Z_RAMP)
+    {
+        float range_min = material.debug_params.z;
+        float range_max = max(material.debug_params.w, range_min + 0.0001);
+        result = mesh_height_ramp((in_world_position.z - range_min) / (range_max - range_min));
+    }
+    else if (mode == DEBUG_FACET_COLOR)
+    {
+        result = facet_color(in_facet_seed);
+    }
+    else if (mode == DEBUG_ANGLE_SHADED)
+    {
+        vec3 view = normalize_or(material.camera_position.xyz - in_world_position, vec3(0.0, 0.0, 1.0));
+        result = angle_shaded_surface(normal, view);
+    }
+
     if (mode == DEBUG_SELECTED_PULSE || material.debug_params2.z > 0.5)
     {
         result = apply_selected_pulse(result, material);

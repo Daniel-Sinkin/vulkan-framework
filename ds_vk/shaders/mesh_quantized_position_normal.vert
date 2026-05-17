@@ -28,6 +28,7 @@ layout(location = 1) out vec4 out_color;
 layout(location = 2) flat out uint out_material_index;
 layout(location = 3) out vec3 out_world_position;
 layout(location = 4) out vec2 out_texcoord;
+layout(location = 5) flat out vec3 out_facet_seed;
 
 vec2 oct_wrap(vec2 value)
 {
@@ -55,4 +56,5 @@ void main()
     out_material_index = instance.material_index;
     out_world_position = world_position.xyz;
     out_texcoord = vec2(0.0);
+    out_facet_seed = world_position.xyz + out_normal * 0.173;
 }

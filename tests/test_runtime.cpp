@@ -218,6 +218,12 @@ auto test_draw_list() -> void
     check(draw.debug_segments().size() == 2u, "debug line and arrow are recorded");
     draw.debug_arrow({
         .origin = {0.0f, 0.0f, 0.0f},
+        .vector = 0.001f * ds_vk::k_axis_y,
+        .color = ds_vk::Color::white,
+    });
+    check(draw.debug_segments().size() == 2u, "tiny debug arrows are ignored");
+    draw.debug_arrow({
+        .origin = {0.0f, 0.0f, 0.0f},
         .vector = ds_vk::k_axis_z,
         .color = ds_vk::Color::white,
         .draw_on_top = true,
