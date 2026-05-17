@@ -4641,6 +4641,7 @@ auto Runtime::Impl::begin_frame() -> FrameContext*
                 .graphics_queue = queue,
                 .graphics_queue_family = queue_family,
                 .command_buffer = active_window_frame->CommandBuffer,
+                .main_render_pass = window_data.RenderPass,
                 .allocator = vma_allocator,
                 .extent = extent,
                 .frame_index =

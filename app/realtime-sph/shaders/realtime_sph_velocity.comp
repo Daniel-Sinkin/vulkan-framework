@@ -1,0 +1,93 @@
+#version 450
+
+layout(local_size_x = 128) in;
+
+struct Particle
+{
+    vec4 position_radius;
+    vec4 previous_density;
+    vec4 velocity_lambda;
+    vec4 delta_neighbors;
+};
+
+struct SimParams
+{
+    vec4 domain_min_dt;
+    vec4 domain_max_radius;
+    vec4 gravity_rest_density;
+    vec4 kernel_poly6_spiky;
+    vec4 pbf_params;
+    vec4 viscosity_vorticity;
+    uvec4 counts;
+    uvec4 grid_size;
+};
+
+struct SimStats
+{
+    uint escaped;
+    uint overflow;
+    uint active_count;
+    uint nan_count;
+    uint max_neighbors;
+    uint max_speed_milli;
+    uint reserved0;
+    uint reserved1;
+};
+
+layout(std430, set = 0, binding = 0) buffer Particles
+{
+    Particle particles[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer ParamsBuffer
+{
+    SimParams params;
+};
+layout(std430, set = 0, binding = 4) buffer StatsBuffer
+{
+    SimStats stats;
+};
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= params.counts.x)
+    {
+        return;
+    }
+
+    Particle p = particles[id];
+    const float dt = params.domain_min_dt.w;
+    const float radius = params.domain_max_radius.w;
+    const float bounce = params.viscosity_vorticity.y;
+    const float damping = params.viscosity_vorticity.z;
+    const float speed_limit = params.viscosity_vorticity.w;
+    const vec3 lower = params.domain_min_dt.xyz + vec3(radius);
+    const vec3 upper = params.domain_max_radius.xyz - vec3(radius);
+
+    vec3 x = clamp(p.position_radius.xyz, lower, upper);
+    vec3 v = (x - p.previous_density.xyz) / max(dt, 1.0e-6);
+    if (p.position_radius.x <= lower.x || p.position_radius.x >= upper.x)
+    {
+        v.x *= -bounce;
+    }
+    if (p.position_radius.y <= lower.y || p.position_radius.y >= upper.y)
+    {
+        v.y *= -bounce;
+    }
+    if (p.position_radius.z <= lower.z || p.position_radius.z >= upper.z)
+    {
+        v.z *= -bounce;
+    }
+    v *= damping;
+    const float speed = length(v);
+    if (speed > speed_limit)
+    {
+        v *= speed_limit / speed;
+    }
+
+    p.position_radius.xyz = x;
+    p.velocity_lambda.xyz = v;
+    p.velocity_lambda.w = 0.0;
+    particles[id] = p;
+    atomicMax(stats.max_speed_milli, uint(min(length(v) * 1000.0, 4294967040.0)));
+}

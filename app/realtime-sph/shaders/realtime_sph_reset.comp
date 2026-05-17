@@ -1,0 +1,60 @@
+#version 450
+
+layout(local_size_x = 128) in;
+
+struct SimParams
+{
+    vec4 domain_min_dt;
+    vec4 domain_max_radius;
+    vec4 gravity_rest_density;
+    vec4 kernel_poly6_spiky;
+    vec4 pbf_params;
+    vec4 viscosity_vorticity;
+    uvec4 counts;
+    uvec4 grid_size;
+};
+
+struct SimStats
+{
+    uint escaped;
+    uint overflow;
+    uint active_count;
+    uint nan_count;
+    uint max_neighbors;
+    uint max_speed_milli;
+    uint reserved0;
+    uint reserved1;
+};
+
+layout(std430, set = 0, binding = 1) buffer CellCounts
+{
+    uint cell_counts[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer ParamsBuffer
+{
+    SimParams params;
+};
+layout(std430, set = 0, binding = 4) buffer StatsBuffer
+{
+    SimStats stats;
+};
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id < params.counts.y)
+    {
+        cell_counts[id] = 0u;
+    }
+    if (id == 0u)
+    {
+        stats.escaped = 0u;
+        stats.overflow = 0u;
+        stats.active_count = params.counts.x;
+        stats.nan_count = 0u;
+        stats.max_neighbors = 0u;
+        stats.max_speed_milli = 0u;
+        stats.reserved0 = 0u;
+        stats.reserved1 = 0u;
+    }
+}

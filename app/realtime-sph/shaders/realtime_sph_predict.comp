@@ -1,0 +1,105 @@
+#version 450
+
+layout(local_size_x = 128) in;
+
+struct Particle
+{
+    vec4 position_radius;
+    vec4 previous_density;
+    vec4 velocity_lambda;
+    vec4 delta_neighbors;
+};
+
+struct SimParams
+{
+    vec4 domain_min_dt;
+    vec4 domain_max_radius;
+    vec4 gravity_rest_density;
+    vec4 kernel_poly6_spiky;
+    vec4 pbf_params;
+    vec4 viscosity_vorticity;
+    uvec4 counts;
+    uvec4 grid_size;
+};
+
+struct SimStats
+{
+    uint escaped;
+    uint overflow;
+    uint active_count;
+    uint nan_count;
+    uint max_neighbors;
+    uint max_speed_milli;
+    uint reserved0;
+    uint reserved1;
+};
+
+layout(std430, set = 0, binding = 0) buffer Particles
+{
+    Particle particles[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer ParamsBuffer
+{
+    SimParams params;
+};
+layout(std430, set = 0, binding = 4) buffer StatsBuffer
+{
+    SimStats stats;
+};
+
+bool invalid_vec3(vec3 v)
+{
+    return any(isnan(v)) || any(isinf(v));
+}
+
+vec3 respawn_position(uint id)
+{
+    const vec3 span = params.domain_max_radius.xyz - params.domain_min_dt.xyz;
+    const float fx = float((id * 73u) % 997u) / 997.0;
+    const float fy = float((id * 191u) % 991u) / 991.0;
+    return vec3(
+        params.domain_min_dt.x + (0.20 + 0.60 * fx) * span.x,
+        params.domain_min_dt.y + (0.20 + 0.60 * fy) * span.y,
+        params.domain_max_radius.z - max(4.0 * params.domain_max_radius.w, 0.18)
+    );
+}
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= params.counts.x)
+    {
+        return;
+    }
+
+    Particle p = particles[id];
+    const float dt = params.domain_min_dt.w;
+    const float radius = params.domain_max_radius.w;
+    const vec3 lower = params.domain_min_dt.xyz + vec3(radius);
+    const vec3 upper = params.domain_max_radius.xyz - vec3(radius);
+
+    p.previous_density.xyz = p.position_radius.xyz;
+    p.previous_density.w = 0.0;
+    p.delta_neighbors = vec4(0.0);
+
+    vec3 v = p.velocity_lambda.xyz + params.gravity_rest_density.xyz * dt;
+    vec3 x = p.position_radius.xyz + v * dt;
+
+    if (invalid_vec3(x) || invalid_vec3(v) || any(lessThan(x, params.domain_min_dt.xyz - vec3(0.25))) ||
+        any(greaterThan(x, params.domain_max_radius.xyz + vec3(0.25))))
+    {
+        x = respawn_position(id);
+        v = vec3(0.0);
+        atomicAdd(stats.escaped, 1u);
+        if (invalid_vec3(p.position_radius.xyz) || invalid_vec3(p.velocity_lambda.xyz))
+        {
+            atomicAdd(stats.nan_count, 1u);
+        }
+    }
+
+    x = clamp(x, lower, upper);
+    p.position_radius.xyz = x;
+    p.position_radius.w = radius;
+    p.velocity_lambda = vec4(v, 0.0);
+    particles[id] = p;
+}

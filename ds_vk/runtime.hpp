@@ -305,6 +305,7 @@ struct FrameContext
     VkQueue graphics_queue{VK_NULL_HANDLE};
     u32 graphics_queue_family{};
     VkCommandBuffer command_buffer{VK_NULL_HANDLE};
+    VkRenderPass main_render_pass{VK_NULL_HANDLE};
     VmaAllocator allocator{VK_NULL_HANDLE};
     VkExtent2D extent{};
     u32 frame_index{};

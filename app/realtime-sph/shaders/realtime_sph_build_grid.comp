@@ -1,0 +1,87 @@
+#version 450
+
+layout(local_size_x = 128) in;
+
+struct Particle
+{
+    vec4 position_radius;
+    vec4 previous_density;
+    vec4 velocity_lambda;
+    vec4 delta_neighbors;
+};
+
+struct SimParams
+{
+    vec4 domain_min_dt;
+    vec4 domain_max_radius;
+    vec4 gravity_rest_density;
+    vec4 kernel_poly6_spiky;
+    vec4 pbf_params;
+    vec4 viscosity_vorticity;
+    uvec4 counts;
+    uvec4 grid_size;
+};
+
+struct SimStats
+{
+    uint escaped;
+    uint overflow;
+    uint active_count;
+    uint nan_count;
+    uint max_neighbors;
+    uint max_speed_milli;
+    uint reserved0;
+    uint reserved1;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Particles
+{
+    Particle particles[];
+};
+layout(std430, set = 0, binding = 1) buffer CellCounts
+{
+    uint cell_counts[];
+};
+layout(std430, set = 0, binding = 2) buffer CellParticles
+{
+    uint cell_particles[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer ParamsBuffer
+{
+    SimParams params;
+};
+layout(std430, set = 0, binding = 4) buffer StatsBuffer
+{
+    SimStats stats;
+};
+
+uvec3 cell_for_position(vec3 p)
+{
+    const vec3 rel = (p - params.domain_min_dt.xyz) / params.kernel_poly6_spiky.z;
+    return clamp(uvec3(floor(rel)), uvec3(0u), params.grid_size.xyz - uvec3(1u));
+}
+
+uint flatten_cell(uvec3 c)
+{
+    return c.x + params.grid_size.x * (c.y + params.grid_size.y * c.z);
+}
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= params.counts.x)
+    {
+        return;
+    }
+
+    const uint cell = flatten_cell(cell_for_position(particles[id].position_radius.xyz));
+    const uint slot = atomicAdd(cell_counts[cell], 1u);
+    if (slot < params.counts.z)
+    {
+        cell_particles[cell * params.counts.z + slot] = id;
+    }
+    else
+    {
+        atomicAdd(stats.overflow, 1u);
+    }
+}

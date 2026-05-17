@@ -178,6 +178,14 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     ds_vk/shaders/shadow_quantized_position.vert
     ds_vk/shaders/debug_line.vert
     ds_vk/shaders/debug_line.frag
+    app/realtime-sph/shaders/realtime_sph_reset.comp
+    app/realtime-sph/shaders/realtime_sph_predict.comp
+    app/realtime-sph/shaders/realtime_sph_build_grid.comp
+    app/realtime-sph/shaders/realtime_sph_lambda.comp
+    app/realtime-sph/shaders/realtime_sph_delta.comp
+    app/realtime-sph/shaders/realtime_sph_velocity.comp
+    app/realtime-sph/shaders/realtime_sph_particles.vert
+    app/realtime-sph/shaders/realtime_sph_particles.frag
   )
   set(DS_VK_SHADER_OUTPUTS)
   foreach(DS_VK_SHADER ${DS_VK_SHADER_SOURCES})
@@ -304,6 +312,22 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     ds_vk_warnings
   )
   ds_vk_enable_pch(ds_vk_quake_app)
+
+  add_executable(ds_vk_realtime_sph_app
+    app/realtime_sph_main.cpp
+    app/realtime-sph/realtime_sph_app.cpp
+  )
+  target_compile_definitions(ds_vk_realtime_sph_app PRIVATE
+    DS_VK_SHADER_DIR="${DS_VK_SHADER_OUTPUT_DIR}"
+  )
+  target_link_libraries(ds_vk_realtime_sph_app PRIVATE
+    ds_vk
+    ds_vk_viz
+    ds_vk_picker
+    ds_vk_manipulator
+    ds_vk_warnings
+  )
+  ds_vk_enable_pch(ds_vk_realtime_sph_app)
 
   if(DS_VK_BUILD_TESTS)
     add_executable(ds_vk_runtime_tests tests/test_runtime.cpp)

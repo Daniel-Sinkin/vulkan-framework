@@ -91,3 +91,6 @@ assets/hdri/polyhaven/*.hdr
 # Local Quake source data cache.
 app/quake/assets/
 app/quake/outputs/
+
+# Local-only realtime SPH research notes and papers.
+app/realtime-sph/research/
