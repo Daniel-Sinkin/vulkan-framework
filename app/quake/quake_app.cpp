@@ -112,7 +112,10 @@ auto run_quake_app() -> int
 
     std::vector<ParsedModel> parsed_models{};
     parsed_models.reserve(mdl_files.size());
-    const auto dump_texel_indices = std::getenv("DS_VK_QUAKE_DUMP_TEXEL_INDICES") != nullptr;
+    const auto dump_skin_images = std::getenv("DS_VK_QUAKE_DUMP_TEXEL_INDICES") != nullptr;
+    auto parsed_mdl_count = 0zu;
+    auto dumped_skin_count = 0zu;
+    auto dumped_palette = false;
     for (const auto& file : mdl_files)
     {
         const auto name = file.stem().string();
@@ -121,9 +124,16 @@ auto run_quake_app() -> int
         {
             continue;
         }
-        if (dump_texel_indices)
+        ++parsed_mdl_count;
+        if (dump_skin_images)
         {
-            save_mdl_skins_to_file(binary->skins, binary->header, name);
+            dumped_skin_count +=
+                save_mdl_skins_to_file(binary->skins, binary->header, binary->palette, name);
+            if (!dumped_palette)
+            {
+                dumped_palette = save_quake_palette_to_file(binary->palette);
+            }
+            continue;
         }
         if (binary->frames.empty())
         {
@@ -176,6 +186,24 @@ auto run_quake_app() -> int
                 .render_triangles = render_triangles,
             }
         );
+    }
+
+    if (dump_skin_images)
+    {
+        std::println(
+            "Dumped {} colored MDL skin image(s) from {} parsed MDL file(s) to {}",
+            dumped_skin_count,
+            parsed_mdl_count,
+            paths::skin_output_dir.string()
+        );
+        if (dumped_palette)
+        {
+            std::println(
+                "Wrote palette preview to {}",
+                (paths::skin_output_dir / "quake_palette.ppm").string()
+            );
+        }
+        return dumped_skin_count > 0zu and dumped_palette ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
     if (parsed_models.empty())

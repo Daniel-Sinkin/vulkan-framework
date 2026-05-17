@@ -81,6 +81,16 @@ struct MdlTriVertex
     u8 light_normal_index{};
 };
 
+struct MdlPaletteEntry
+{
+    u8 r{};
+    u8 g{};
+    u8 b{};
+};
+static_assert(sizeof(MdlPaletteEntry) == 3zu);
+
+using MdlPalette = std::array<MdlPaletteEntry, 256>;
+
 struct MdlFrame
 {
     MdlTriVertex bbox_min{};
@@ -101,6 +111,7 @@ struct MdlSkin
 struct MdlBinary
 {
     MdlHeader header{};
+    MdlPalette palette{};
     std::vector<MdlSkin> skins{};
     std::vector<MdlVertex> stverts{};
     std::vector<MdlTriangle> triangles{};
@@ -112,12 +123,16 @@ struct MdlBinary
 [[nodiscard]] auto validate(const MdlHeader&) -> MdlHeaderValidity;
 [[nodiscard]] auto is_valid(const MdlHeader&) -> bool;
 [[nodiscard]] auto to_string(const MdlHeader&) -> std::string;
+[[nodiscard]] auto load_quake_palette() -> std::optional<MdlPalette>;
+[[nodiscard]] auto find_black_palette_index(const MdlPalette&) -> std::optional<u8>;
 
 [[nodiscard]] auto make_mesh_data(
     const MdlHeader&, std::span<const MdlVertex>, std::span<const MdlTriangle>, const MdlFrame&
 ) -> std::optional<MeshData>;
 
 [[nodiscard]] auto parse_mdl_binary(const std::filesystem::path&) -> std::optional<MdlBinary>;
-auto save_mdl_skins_to_file(const std::vector<MdlSkin>&, const MdlHeader&, std::string_view)
-    -> void;
+[[nodiscard]] auto save_mdl_skins_to_file(
+    const std::vector<MdlSkin>&, const MdlHeader&, const MdlPalette&, std::string_view
+) -> usize;
+[[nodiscard]] auto save_quake_palette_to_file(const MdlPalette&) -> bool;
 }  // namespace ds_vk_quake

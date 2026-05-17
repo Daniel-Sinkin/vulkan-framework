@@ -77,6 +77,45 @@ auto to_string(MdlSyncType type) -> std::string_view
     return validate(h) == MdlHeaderValidity::Valid;
 }
 
+auto load_quake_palette() -> std::optional<MdlPalette>
+{
+    const auto buf = load_binary_file(paths::palette_path);
+    if (!buf)
+    {
+        std::println(stderr, "Failed to load Quake palette {}", paths::palette_path.string());
+        return std::nullopt;
+    }
+
+    if (buf->size() != sizeof(MdlPalette))
+    {
+        std::println(
+            stderr,
+            "Invalid Quake palette size in {}: expected {} bytes, got {}",
+            paths::palette_path.string(),
+            sizeof(MdlPalette),
+            buf->size()
+        );
+        return std::nullopt;
+    }
+
+    MdlPalette palette{};
+    std::memcpy(palette.data(), buf->data(), sizeof(MdlPalette));
+    return palette;
+}
+
+auto find_black_palette_index(const MdlPalette& palette) -> std::optional<u8>
+{
+    for (auto i = 0zu; i < palette.size(); ++i)
+    {
+        const auto& entry = palette[i];
+        if (entry.r == 0u and entry.g == 0u and entry.b == 0u)
+        {
+            return static_cast<u8>(i);
+        }
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] auto to_string(const MdlHeader& header) -> std::string
 {
     return std::format(
@@ -268,7 +307,10 @@ auto parse_mdl_header(std::span<const std::byte>& buf) -> MdlHeader
 namespace
 {
 auto parse_mdl_skins_single(
-    std::span<const std::byte>& buf, const MdlHeader& header, bool flood_fill = true
+    std::span<const std::byte>& buf,
+    const MdlHeader& header,
+    u8 flood_fill_target,
+    bool flood_fill = true
 ) -> MdlSkinData
 {
     const auto sh = static_cast<usize>(header.skin_height);
@@ -277,15 +319,13 @@ auto parse_mdl_skins_single(
     std::vector<u8> out(pixel_count);
     std::memcpy(out.data(), buf.data(), out.size());
 
-    const auto fill_origin = out[0];
-    const auto fill_target = 0;  // TODO: Do palette lookup here instead
-
     std::mdspan<u8, std::dextents<usize, 2>> texels{out.data(), sh, sw};
 
-    if (flood_fill)
+    if (flood_fill and flood_fill_target != texels[0, 0])
     {
+        const auto fill_origin = texels[0, 0];
         std::queue<std::pair<int, int>> q{};
-        texels[0, 0] = fill_target;
+        texels[0, 0] = flood_fill_target;
         q.emplace(0, 0);
         const auto try_neighbor = [&](int yp, int xp) -> void
         {
@@ -293,7 +333,7 @@ auto parse_mdl_skins_single(
             const auto valid_x = in_interval(xp, 0, sw - 1);
             if (valid_y and valid_x and texels[yp, xp] == fill_origin)
             {
-                texels[yp, xp] = fill_target;
+                texels[yp, xp] = flood_fill_target;
                 q.emplace(yp, xp);
             }
         };
@@ -315,7 +355,10 @@ auto parse_mdl_skins_single(
 }  // namespace
 
 auto parse_mdl_skins(
-    std::span<const std::byte>& buf, const MdlHeader& header, bool flood_fill = true
+    std::span<const std::byte>& buf,
+    const MdlHeader& header,
+    u8 flood_fill_target,
+    bool flood_fill = true
 ) -> std::vector<MdlSkin>
 {
     const auto num_skins = static_cast<usize>(header.num_skins);
@@ -328,7 +371,9 @@ auto parse_mdl_skins(
         {
             case MdlSkinType::Single:
                 {
-                    out[skin_idx].images.push_back(parse_mdl_skins_single(buf, header, flood_fill));
+                    out[skin_idx].images.push_back(
+                        parse_mdl_skins_single(buf, header, flood_fill_target, flood_fill)
+                    );
                 }
                 break;
             case MdlSkinType::Group:
@@ -344,7 +389,7 @@ auto parse_mdl_skins(
                     for (auto j = 0zu; j < group_skins; ++j)
                     {
                         out[skin_idx].images.push_back(
-                            parse_mdl_skins_single(buf, header, flood_fill)
+                            parse_mdl_skins_single(buf, header, flood_fill_target, flood_fill)
                         );
                     }
                 }
@@ -407,40 +452,115 @@ auto parse_mdl_frames(std::span<const std::byte>& buf, const MdlHeader& header)
     return out;
 }
 
-auto save_mdl_skins_to_file(
-    const std::vector<MdlSkin>& skins, const MdlHeader& header, std::string_view name
-) -> void
+namespace
+{
+auto ensure_skin_output_dir() -> bool
 {
     std::error_code ec;
-    std::filesystem::create_directories(paths::texel_index_output_dir, ec);
+    std::filesystem::create_directories(paths::skin_output_dir, ec);
     if (ec)
     {
         std::println(
             stderr,
-            "Failed to create texel index output directory {}: {}",
-            paths::texel_index_output_dir.string(),
+            "Failed to create skin output directory {}: {}",
+            paths::skin_output_dir.string(),
             ec.message()
         );
-        return;
+        return false;
+    }
+    return true;
+}
+
+auto write_ppm_header(std::ofstream& out, usize width, usize height) -> void
+{
+    out << "P6\n" << width << " " << height << "\n255\n";
+}
+
+auto write_palette_entry(std::ofstream& out, const MdlPalette& palette, u8 index) -> void
+{
+    const auto& entry = palette[index];
+    const std::array<u8, 3> rgb{entry.r, entry.g, entry.b};
+    out.write(reinterpret_cast<const char*>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
+}
+}  // namespace
+
+auto save_quake_palette_to_file(const MdlPalette& palette) -> bool
+{
+    if (!ensure_skin_output_dir())
+    {
+        return false;
     }
 
+    const auto output_path = paths::skin_output_dir / "quake_palette.ppm";
+    std::ofstream dump{output_path, std::ios::binary};
+    if (!dump)
+    {
+        std::println(stderr, "Failed to open palette output {}", output_path.string());
+        return false;
+    }
+
+    constexpr auto palette_width = 16zu;
+    constexpr auto palette_height = 16zu;
+    write_ppm_header(dump, palette_width, palette_height);
+    for (auto i = 0zu; i < palette.size(); ++i)
+    {
+        write_palette_entry(dump, palette, static_cast<u8>(i));
+    }
+
+    if (!dump)
+    {
+        std::println(stderr, "Failed to write palette output {}", output_path.string());
+        return false;
+    }
+    return true;
+}
+
+auto save_mdl_skins_to_file(
+    const std::vector<MdlSkin>& skins,
+    const MdlHeader& header,
+    const MdlPalette& palette,
+    std::string_view name
+) -> usize
+{
+    if (!ensure_skin_output_dir())
+    {
+        return 0zu;
+    }
+
+    auto written = 0zu;
     for (auto skin_idx = 0zu; skin_idx < skins.size(); ++skin_idx)
     {
         for (auto image_idx = 0zu; image_idx < skins[skin_idx].images.size(); ++image_idx)
         {
             const auto output_name =
                 skins[skin_idx].images.size() == 1zu
-                    ? std::format("{}_skin{}.pgm", name, skin_idx)
-                    : std::format("{}_skin{}_pose{}.pgm", name, skin_idx, image_idx);
-            const auto output_path = paths::texel_index_output_dir / output_name;
+                    ? std::format("{}_skin{}.ppm", name, skin_idx)
+                    : std::format("{}_skin{}_pose{}.ppm", name, skin_idx, image_idx);
+            const auto output_path = paths::skin_output_dir / output_name;
             std::ofstream dump{output_path, std::ios::binary};
-            dump << "P5\n" << header.skin_width << " " << header.skin_height << "\n255\n";
-            dump.write(
-                reinterpret_cast<const char*>(skins[skin_idx].images[image_idx].data()),
-                static_cast<std::streamsize>(skins[skin_idx].images[image_idx].size())
+            if (!dump)
+            {
+                std::println(stderr, "Failed to open colored skin output {}", output_path.string());
+                continue;
+            }
+            write_ppm_header(
+                dump, static_cast<usize>(header.skin_width), static_cast<usize>(header.skin_height)
             );
+            for (const auto palette_index : skins[skin_idx].images[image_idx])
+            {
+                write_palette_entry(dump, palette, palette_index);
+            }
+            if (!dump)
+            {
+                std::println(
+                    stderr, "Failed to write colored skin output {}", output_path.string()
+                );
+                continue;
+            }
+            ++written;
         }
     }
+    return written;
 }
 
 auto parse_mdl_binary(const std::filesystem::path& filepath) -> std::optional<MdlBinary>
@@ -466,7 +586,23 @@ auto parse_mdl_binary(const std::filesystem::path& filepath) -> std::optional<Md
         return std::nullopt;
     }
 
-    out.skins = parse_mdl_skins(buf, out.header);
+    const auto palette = load_quake_palette();
+    if (!palette)
+    {
+        return std::nullopt;
+    }
+    out.palette = *palette;
+
+    const auto black_index = find_black_palette_index(out.palette);
+    if (!black_index)
+    {
+        std::println(
+            stderr, "Quake palette {} contains no pure black entry", paths::palette_path.string()
+        );
+        return std::nullopt;
+    }
+
+    out.skins = parse_mdl_skins(buf, out.header, *black_index);
     out.stverts = read_values<MdlVertex>(buf, static_cast<usize>(out.header.num_verts));
     out.triangles = read_values<MdlTriangle>(buf, static_cast<usize>(out.header.num_tris));
     out.frames = parse_mdl_frames(buf, out.header);
