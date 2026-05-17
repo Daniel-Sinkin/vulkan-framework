@@ -343,7 +343,7 @@ concept has_runtime_hook =
 class Runtime
 {
   public:
-    explicit Runtime(RuntimeConfig config = {});
+    explicit Runtime(RuntimeConfig = {});
     ~Runtime();
 
     Runtime(const Runtime&) = delete;
@@ -376,16 +376,16 @@ class Runtime
 
     // Reuses existing buffers when capacity permits. Callers must avoid updating a handle
     // still used by in-flight command buffers.
-    [[nodiscard]] auto update_mesh(MeshHandle, const MeshData&, const MeshUpdateConfig& cfg = {})                        -> MeshHandle;
-    [[nodiscard]] auto update_mesh(MeshHandle, const PositionNormalMeshData&, const MeshUpdateConfig& cfg = {})          -> MeshHandle;
-    [[nodiscard]] auto update_mesh(MeshHandle, const QuantizedPositionNormalMeshData&, const MeshUpdateConfig& cfg = {}) -> MeshHandle;
+    [[nodiscard]] auto update_mesh(MeshHandle, const MeshData&, const MeshUpdateConfig& = {})                        -> MeshHandle;
+    [[nodiscard]] auto update_mesh(MeshHandle, const PositionNormalMeshData&, const MeshUpdateConfig& = {})          -> MeshHandle;
+    [[nodiscard]] auto update_mesh(MeshHandle, const QuantizedPositionNormalMeshData&, const MeshUpdateConfig& = {}) -> MeshHandle;
 
     [[nodiscard]] auto replace_mesh(MeshHandle, const MeshData&) -> MeshHandle;
-    [[nodiscard]] auto load_texture(const std::filesystem::path&, const TextureLoadConfig& cfg = {}) -> TextureHandle;
-    [[nodiscard]] auto load_hdr_texture(const std::filesystem::path&, const HdrTextureLoadConfig& config = {}) -> TextureHandle;
+    [[nodiscard]] auto load_texture(const std::filesystem::path&, const TextureLoadConfig& = {}) -> TextureHandle;
+    [[nodiscard]] auto load_hdr_texture(const std::filesystem::path&, const HdrTextureLoadConfig& = {}) -> TextureHandle;
     auto request_screenshot(std::filesystem::path path, bool transparent = false) -> void;
 
-    auto camera(const CameraConfig& config)                noexcept -> Camera&;
+    auto camera(const CameraConfig&)                       noexcept -> Camera&;
     [[nodiscard]] auto camera()                            noexcept -> Camera&;
     [[nodiscard]] auto camera()                      const noexcept -> const Camera&;
     [[nodiscard]] auto stats()                       const noexcept -> const RuntimeStats&;

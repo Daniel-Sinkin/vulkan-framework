@@ -38,10 +38,10 @@ struct ColorRampConfig
 class ColorRamp
 {
   public:
-    explicit ColorRamp(ColorRampConfig config = {}) noexcept;
+    explicit ColorRamp(ColorRampConfig = {}) noexcept;
 
     // clang-format off
-    auto configure(const ColorRampConfig& config) noexcept        -> ColorRamp&;
+    auto configure(const ColorRampConfig&) noexcept               -> ColorRamp&;
 
     [[nodiscard]] auto sample(f32 value) const noexcept           -> Color;
     [[nodiscard]] auto normalized_value(f32 value) const noexcept -> f32;

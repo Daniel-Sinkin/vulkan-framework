@@ -127,15 +127,15 @@ class Picker
     // clang-format off
     auto clear()                                                                     -> void;
 
-    [[nodiscard]] auto add_sphere(const PickerSphereConfig& config)                  -> PickTargetId;
-    [[nodiscard]] auto add_aabb(const PickerAabbConfig& config)                      -> PickTargetId;
-    [[nodiscard]] auto add_obb(const PickerObbConfig& config)                        -> PickTargetId;
-    [[nodiscard]] auto add_capsule(const PickerCapsuleConfig& config)                -> PickTargetId;
-    [[nodiscard]] auto add_screen_segment(const PickerScreenSegmentConfig& config)   -> PickTargetId;
+    [[nodiscard]] auto add_sphere(const PickerSphereConfig&)                         -> PickTargetId;
+    [[nodiscard]] auto add_aabb(const PickerAabbConfig&)                             -> PickTargetId;
+    [[nodiscard]] auto add_obb(const PickerObbConfig&)                               -> PickTargetId;
+    [[nodiscard]] auto add_capsule(const PickerCapsuleConfig&)                       -> PickTargetId;
+    [[nodiscard]] auto add_screen_segment(const PickerScreenSegmentConfig&)          -> PickTargetId;
 
-    [[nodiscard]] auto raycast(const PickerRaycastConfig& config) const              -> std::optional<PickerHit>;
-    [[nodiscard]] auto raycast(const Ray& ray) const                                 -> std::optional<PickerHit>;
-    [[nodiscard]] auto click(const PickerClickConfig& config) const                  -> std::optional<PickerHit>;
+    [[nodiscard]] auto raycast(const PickerRaycastConfig&) const                     -> std::optional<PickerHit>;
+    [[nodiscard]] auto raycast(const Ray&) const                                     -> std::optional<PickerHit>;
+    [[nodiscard]] auto click(const PickerClickConfig&) const                         -> std::optional<PickerHit>;
 
     [[nodiscard]] auto target_count() const noexcept                                 -> usize;
     // clang-format on

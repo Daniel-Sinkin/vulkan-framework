@@ -14,6 +14,6 @@ struct GltfMeshLoadConfig
     bool generate_normals_if_missing{true};
 };
 
-[[nodiscard]] auto
-load_gltf_mesh(const std::filesystem::path& path, const GltfMeshLoadConfig& cfg = {}) -> MeshData;
+[[nodiscard]] auto load_gltf_mesh(const std::filesystem::path&, const GltfMeshLoadConfig& = {})
+    -> MeshData;
 }  // namespace ds_vk

@@ -909,8 +909,8 @@ struct Runtime::Impl
     auto initialize() -> void;
     auto shutdown() noexcept -> void;
     auto setup_sdl() -> void;
-    auto setup_vulkan(std::vector<const char*> instance_extensions) -> void;
-    auto setup_vulkan_window(VkSurfaceKHR surface, int width, int height) -> void;
+    auto setup_vulkan(std::vector<const char*>) -> void;
+    auto setup_vulkan_window(VkSurfaceKHR, int width, int height) -> void;
     auto setup_imgui() -> void;
     auto create_pipelines() -> void;
     auto destroy_pipelines() noexcept -> void;
@@ -925,54 +925,51 @@ struct Runtime::Impl
         bool mapped,
         VmaMemoryUsage memory_usage = VMA_MEMORY_USAGE_AUTO
     ) -> Buffer;
-    auto destroy_buffer(Buffer& buffer) noexcept -> void;
+    auto destroy_buffer(Buffer&) noexcept -> void;
     auto begin_immediate_commands() -> VkCommandBuffer;
-    auto end_immediate_commands(VkCommandBuffer command_buffer) -> void;
+    auto end_immediate_commands(VkCommandBuffer) -> void;
     auto create_texture_resource(
         const void* pixels, u32 width, u32 height, VkFormat format, VkDeviceSize bytes_per_pixel
     ) -> TextureResource;
     auto create_default_texture() -> void;
-    auto destroy_texture(TextureResource& texture) noexcept -> void;
-    auto load_texture(const std::filesystem::path& path, const TextureLoadConfig& load_config)
-        -> TextureHandle;
-    auto
-    load_hdr_texture(const std::filesystem::path& path, const HdrTextureLoadConfig& load_config)
+    auto destroy_texture(TextureResource&) noexcept -> void;
+    auto load_texture(const std::filesystem::path&, const TextureLoadConfig&) -> TextureHandle;
+    auto load_hdr_texture(const std::filesystem::path&, const HdrTextureLoadConfig&)
         -> TextureHandle;
     auto ensure_debug_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_debug_on_top_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_mesh_material_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_mesh_instance_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_mesh_lighting_buffer(usize frame_index) -> Buffer&;
-    auto flush_buffer(const Buffer& buffer, VkDeviceSize size) -> void;
-    auto write_buffer(Buffer& buffer, const void* data, VkDeviceSize size) -> void;
-    auto update_mesh_material_descriptor(usize frame_index, const Buffer& buffer) -> void;
-    auto update_mesh_instance_descriptor(usize frame_index, const Buffer& buffer) -> void;
-    auto update_mesh_lighting_descriptor(usize frame_index, const Buffer& buffer) -> void;
+    auto flush_buffer(const Buffer&, VkDeviceSize size) -> void;
+    auto write_buffer(Buffer&, const void* data, VkDeviceSize size) -> void;
+    auto update_mesh_material_descriptor(usize frame_index, const Buffer&) -> void;
+    auto update_mesh_instance_descriptor(usize frame_index, const Buffer&) -> void;
+    auto update_mesh_lighting_descriptor(usize frame_index, const Buffer&) -> void;
     auto update_mesh_texture_descriptors() -> void;
     auto update_mesh_shadow_descriptors() -> void;
     auto create_mesh_resource(
         usize vertex_capacity, usize index_capacity, MeshVertexFormat vertex_format
     ) -> MeshResource;
-    auto create_mesh_resource(const MeshData& mesh) -> MeshResource;
-    auto create_mesh_resource(const PositionNormalMeshData& mesh) -> MeshResource;
-    auto create_mesh_resource(const QuantizedPositionNormalMeshData& mesh) -> MeshResource;
-    auto destroy_mesh_resource(MeshResource& mesh) noexcept -> void;
-    auto retire_mesh_resource(MeshResource mesh) -> void;
+    auto create_mesh_resource(const MeshData&) -> MeshResource;
+    auto create_mesh_resource(const PositionNormalMeshData&) -> MeshResource;
+    auto create_mesh_resource(const QuantizedPositionNormalMeshData&) -> MeshResource;
+    auto destroy_mesh_resource(MeshResource&) noexcept -> void;
+    auto retire_mesh_resource(MeshResource) -> void;
     auto collect_retired_meshes() noexcept -> void;
-    auto upload_mesh(const MeshData& mesh) -> MeshHandle;
-    auto upload_mesh(const PositionNormalMeshData& mesh) -> MeshHandle;
-    auto upload_mesh(const QuantizedPositionNormalMeshData& mesh) -> MeshHandle;
-    auto reserve_mesh_capacity(const MeshReserveConfig& cfg) -> MeshHandle;
-    auto update_mesh(MeshHandle handle, const MeshData& mesh, const MeshUpdateConfig& cfg)
-        -> MeshHandle;
+    auto upload_mesh(const MeshData&) -> MeshHandle;
+    auto upload_mesh(const PositionNormalMeshData&) -> MeshHandle;
+    auto upload_mesh(const QuantizedPositionNormalMeshData&) -> MeshHandle;
+    auto reserve_mesh_capacity(const MeshReserveConfig&) -> MeshHandle;
+    auto update_mesh(MeshHandle handle, const MeshData&, const MeshUpdateConfig&) -> MeshHandle;
     auto update_mesh(MeshHandle, const PositionNormalMeshData&, const MeshUpdateConfig&)
         -> MeshHandle;
-    auto update_mesh(
-        MeshHandle handle, const QuantizedPositionNormalMeshData& mesh, const MeshUpdateConfig& cfg
-    ) -> MeshHandle;
-    auto replace_mesh(MeshHandle handle, const MeshData& mesh) -> MeshHandle;
-    auto replace_mesh(MeshHandle handle, const PositionNormalMeshData& mesh) -> MeshHandle;
-    auto replace_mesh(MeshHandle handle, const QuantizedPositionNormalMeshData& mesh) -> MeshHandle;
+    auto
+    update_mesh(MeshHandle handle, const QuantizedPositionNormalMeshData&, const MeshUpdateConfig&)
+        -> MeshHandle;
+    auto replace_mesh(MeshHandle handle, const MeshData&) -> MeshHandle;
+    auto replace_mesh(MeshHandle handle, const PositionNormalMeshData&) -> MeshHandle;
+    auto replace_mesh(MeshHandle handle, const QuantizedPositionNormalMeshData&) -> MeshHandle;
     [[nodiscard]] auto begin_frame() -> FrameContext*;
     [[nodiscard]] auto frame() -> FrameContext&;
     [[nodiscard]] auto frame() const -> const FrameContext&;
@@ -983,34 +980,31 @@ struct Runtime::Impl
     auto end_main_pass() -> void;
     auto end_frame() -> void;
     auto finish_imgui_without_rendering() -> void;
-    auto set_main_pass_viewport(VkCommandBuffer command_buffer, VkExtent2D extent) -> void;
-    auto draw_shadow_map(VkCommandBuffer command_buffer) -> void;
-    auto draw_environment(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index)
-        -> void;
-    auto draw_meshes(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index) -> void;
+    auto set_main_pass_viewport(VkCommandBuffer, VkExtent2D) -> void;
+    auto draw_shadow_map(VkCommandBuffer) -> void;
+    auto draw_environment(VkCommandBuffer, VkExtent2D, usize frame_index) -> void;
+    auto draw_meshes(VkCommandBuffer, VkExtent2D, usize frame_index) -> void;
     auto draw_debug_segments(
-        VkCommandBuffer command_buffer,
-        VkExtent2D extent,
+        VkCommandBuffer,
+        VkExtent2D,
         usize frame_index,
         std::span<const DebugSegment> segments,
         VkPipeline pipeline,
         bool draw_on_top
     ) -> void;
-    auto draw_debug(VkCommandBuffer command_buffer, VkExtent2D extent, usize frame_index) -> void;
+    auto draw_debug(VkCommandBuffer, VkExtent2D, usize frame_index) -> void;
     auto draw_runtime_ui() -> void;
-    auto handle_event(const SDL_Event& event) -> void;
+    auto handle_event(const SDL_Event&) -> void;
     [[nodiscard]] auto framebuffer_mouse_position(f32 window_x, f32 window_y) const -> Vec2;
     [[nodiscard]] auto current_modifiers() const noexcept -> KeyboardModifiers;
     auto reset_input_frame() -> void;
     auto rebuild_swapchain_if_needed() -> void;
-    auto create_capture_buffer(SwapchainCapture& capture) -> void;
-    auto destroy_capture_buffer(SwapchainCapture& capture) noexcept -> void;
+    auto create_capture_buffer(SwapchainCapture&) -> void;
+    auto destroy_capture_buffer(SwapchainCapture&) noexcept -> void;
     auto record_capture_commands(
-        VkCommandBuffer command_buffer,
-        const ImGui_ImplVulkanH_Frame* frame,
-        const SwapchainCapture& capture
+        VkCommandBuffer, const ImGui_ImplVulkanH_Frame*, const SwapchainCapture&
     ) -> void;
-    auto write_capture_png(const SwapchainCapture& capture) -> void;
+    auto write_capture_png(const SwapchainCapture&) -> void;
     auto present_frame() -> void;
 };
 

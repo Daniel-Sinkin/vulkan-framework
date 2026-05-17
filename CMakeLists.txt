@@ -282,7 +282,13 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
   )
   ds_vk_enable_pch(ds_vk_pba_app)
 
-  add_executable(ds_vk_quake_app app/quake_main.cpp)
+  add_executable(ds_vk_quake_app
+    app/quake_main.cpp
+    app/quake/background_music.cpp
+    app/quake/io.cpp
+    app/quake/mdl.cpp
+    app/quake/quake_app.cpp
+  )
   target_compile_definitions(ds_vk_quake_app PRIVATE
     DS_VK_QUAKE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app/quake/assets"
   )

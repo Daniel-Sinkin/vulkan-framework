@@ -62,7 +62,7 @@ struct ManipulatorConfig
 class Manipulator
 {
   public:
-    auto update(const ManipulatorConfig& cfg) -> void;
+    auto update(const ManipulatorConfig&) -> void;
     auto cancel() -> void;
     auto confirm() noexcept -> void;
 
@@ -80,9 +80,9 @@ class Manipulator
         Transform start_transform{};
     };
 
-    auto begin(const ManipulatorConfig& cfg, ManipulatorMode mode) -> void;
-    auto apply(const ManipulatorConfig& cfg) -> void;
-    auto set_axis_from_input(const ManipulatorInput& input) noexcept -> void;
+    auto begin(const ManipulatorConfig&, ManipulatorMode mode) -> void;
+    auto apply(const ManipulatorConfig&) -> void;
+    auto set_axis_from_input(const ManipulatorInput&) noexcept -> void;
 
     bool active_{};
     ManipulatorMode mode_{ManipulatorMode::none};

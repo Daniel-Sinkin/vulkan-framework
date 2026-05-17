@@ -54,17 +54,17 @@ struct RayHit
 };
 
 // clang-format off
-[[nodiscard]] auto make_camera_ray(const Camera& camera, Vec2 cursor_px, Vec2 viewport_px) noexcept -> Ray;
+[[nodiscard]] auto make_camera_ray(const Camera&, Vec2 cursor_px, Vec2 viewport_px) noexcept -> Ray;
 
-[[nodiscard]] auto intersect_sphere(const Ray& ray, const Sphere& sphere) noexcept    -> std::optional<f32>;
-[[nodiscard]] auto intersect_aabb(const Ray& ray, const Aabb& aabb) noexcept          -> std::optional<f32>;
-[[nodiscard]] auto intersect_obb(const Ray& ray, const Obb& obb) noexcept             -> std::optional<f32>;
-[[nodiscard]] auto intersect_capsule(const Ray& ray, const Capsule& capsule) noexcept -> std::optional<f32>;
+[[nodiscard]] auto intersect_sphere(const Ray&, const Sphere&) noexcept    -> std::optional<f32>;
+[[nodiscard]] auto intersect_aabb(const Ray&, const Aabb&) noexcept        -> std::optional<f32>;
+[[nodiscard]] auto intersect_obb(const Ray&, const Obb&) noexcept          -> std::optional<f32>;
+[[nodiscard]] auto intersect_capsule(const Ray&, const Capsule&) noexcept  -> std::optional<f32>;
 
-[[nodiscard]] auto hit_sphere(const Ray& ray, const Sphere& sphere) noexcept          -> std::optional<RayHit>;
-[[nodiscard]] auto hit_aabb(const Ray& ray, const Aabb& aabb) noexcept                -> std::optional<RayHit>;
-[[nodiscard]] auto hit_obb(const Ray& ray, const Obb& obb) noexcept                   -> std::optional<RayHit>;
-[[nodiscard]] auto hit_capsule(const Ray& ray, const Capsule& capsule) noexcept       -> std::optional<RayHit>;
+[[nodiscard]] auto hit_sphere(const Ray&, const Sphere&) noexcept          -> std::optional<RayHit>;
+[[nodiscard]] auto hit_aabb(const Ray&, const Aabb&) noexcept              -> std::optional<RayHit>;
+[[nodiscard]] auto hit_obb(const Ray&, const Obb&) noexcept                -> std::optional<RayHit>;
+[[nodiscard]] auto hit_capsule(const Ray&, const Capsule&) noexcept        -> std::optional<RayHit>;
 // clang-format on
 
 }  // namespace ds_vk

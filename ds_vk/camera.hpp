@@ -29,7 +29,7 @@ class Camera
 {
   public:
     // clang-format off
-    auto configure(const CameraConfig& config) noexcept -> Camera&;
+    auto configure(const CameraConfig&) noexcept -> Camera&;
 
     [[nodiscard]] auto pivot() noexcept                   -> Vec3&;
     [[nodiscard]] auto pivot() const noexcept             -> const Vec3&;
