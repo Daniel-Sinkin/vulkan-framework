@@ -20,34 +20,140 @@ auto Camera::configure(const CameraConfig& config) noexcept -> Camera&
     zoom_sensitivity_ = config.zoom_sensitivity;
     z_near_ = config.z_near;
     z_far_ = config.z_far;
+    allow_pivot_move_ = config.allow_pivot_move;
+    clamp_position_z_min_ = config.clamp_position_z_min;
+    min_position_z_ = config.min_position_z;
     projection_mode_ = config.projection_mode;
+    apply_constraints();
     return *this;
 }
 
 // clang-format off
-auto Camera::pivot() noexcept                   -> Vec3&           { return pivot_; }
-auto Camera::pivot() const noexcept             -> const Vec3&     { return pivot_; }
-auto Camera::distance() noexcept                -> f32&            { return distance_; }
-auto Camera::distance() const noexcept          -> f32             { return distance_; }
-auto Camera::yaw() noexcept                     -> f32&            { return yaw_; }
-auto Camera::yaw() const noexcept               -> f32             { return yaw_; }
-auto Camera::pitch() noexcept                   -> f32&            { return pitch_; }
-auto Camera::pitch() const noexcept             -> f32             { return pitch_; }
-auto Camera::fov_y() noexcept                   -> f32&            { return fov_y_; }
-auto Camera::fov_y() const noexcept             -> f32             { return fov_y_; }
-auto Camera::orbit_sensitivity() noexcept       -> f32&            { return orbit_sensitivity_; }
-auto Camera::orbit_sensitivity() const noexcept -> f32             { return orbit_sensitivity_; }
-auto Camera::pivot_sensitivity() noexcept       -> f32&            { return pivot_sensitivity_; }
-auto Camera::pivot_sensitivity() const noexcept -> f32             { return pivot_sensitivity_; }
-auto Camera::zoom_sensitivity() noexcept        -> f32&            { return zoom_sensitivity_; }
-auto Camera::zoom_sensitivity() const noexcept  -> f32             { return zoom_sensitivity_; }
-auto Camera::z_near() noexcept                  -> f32&            { return z_near_; }
-auto Camera::z_near() const noexcept            -> f32             { return z_near_; }
-auto Camera::z_far() noexcept                   -> f32&            { return z_far_; }
-auto Camera::z_far() const noexcept             -> f32             { return z_far_; }
-auto Camera::projection_mode() noexcept         -> ProjectionMode& { return projection_mode_; }
-auto Camera::projection_mode() const noexcept   -> ProjectionMode  { return projection_mode_; }
+auto Camera::pivot() const noexcept                  -> const Vec3&     { return pivot_; }
+auto Camera::distance() const noexcept               -> f32             { return distance_; }
+auto Camera::yaw() const noexcept                    -> f32             { return yaw_; }
+auto Camera::pitch() const noexcept                  -> f32             { return pitch_; }
+auto Camera::fov_y() const noexcept                  -> f32             { return fov_y_; }
+auto Camera::orbit_sensitivity() const noexcept      -> f32             { return orbit_sensitivity_; }
+auto Camera::pivot_sensitivity() const noexcept      -> f32             { return pivot_sensitivity_; }
+auto Camera::zoom_sensitivity() const noexcept       -> f32             { return zoom_sensitivity_; }
+auto Camera::z_near() const noexcept                 -> f32             { return z_near_; }
+auto Camera::z_far() const noexcept                  -> f32             { return z_far_; }
+auto Camera::allow_pivot_move() const noexcept       -> bool            { return allow_pivot_move_; }
+auto Camera::clamp_position_z_min() const noexcept   -> bool            { return clamp_position_z_min_; }
+auto Camera::min_position_z() const noexcept         -> f32             { return min_position_z_; }
+auto Camera::projection_mode() const noexcept        -> ProjectionMode  { return projection_mode_; }
 // clang-format on
+
+auto Camera::set_pivot(const Vec3 pivot) noexcept -> Camera&
+{
+    pivot_ = pivot;
+    apply_constraints();
+    return *this;
+}
+
+auto Camera::translate_pivot(const Vec3 offset) noexcept -> Camera&
+{
+    return set_pivot(pivot_ + offset);
+}
+
+auto Camera::set_distance(const f32 distance) noexcept -> Camera&
+{
+    distance_ = distance;
+    apply_constraints();
+    return *this;
+}
+
+auto Camera::set_yaw(const f32 yaw) noexcept -> Camera&
+{
+    yaw_ = yaw;
+    return *this;
+}
+
+auto Camera::set_pitch(const f32 pitch) noexcept -> Camera&
+{
+    pitch_ = pitch;
+    apply_constraints();
+    return *this;
+}
+
+auto Camera::set_fov_y(const f32 fov_y) noexcept -> Camera&
+{
+    fov_y_ = fov_y;
+    return *this;
+}
+
+auto Camera::set_orbit_sensitivity(const f32 sensitivity) noexcept -> Camera&
+{
+    orbit_sensitivity_ = sensitivity;
+    return *this;
+}
+
+auto Camera::set_pivot_sensitivity(const f32 sensitivity) noexcept -> Camera&
+{
+    pivot_sensitivity_ = sensitivity;
+    return *this;
+}
+
+auto Camera::set_zoom_sensitivity(const f32 sensitivity) noexcept -> Camera&
+{
+    zoom_sensitivity_ = sensitivity;
+    return *this;
+}
+
+auto Camera::set_z_near(const f32 z_near) noexcept -> Camera&
+{
+    z_near_ = z_near;
+    return *this;
+}
+
+auto Camera::set_z_far(const f32 z_far) noexcept -> Camera&
+{
+    z_far_ = z_far;
+    return *this;
+}
+
+auto Camera::set_allow_pivot_move(const bool allow) noexcept -> Camera&
+{
+    allow_pivot_move_ = allow;
+    return *this;
+}
+
+auto Camera::set_clamp_position_z_min(const bool clamp) noexcept -> Camera&
+{
+    clamp_position_z_min_ = clamp;
+    apply_constraints();
+    return *this;
+}
+
+auto Camera::set_min_position_z(const f32 min_z) noexcept -> Camera&
+{
+    min_position_z_ = min_z;
+    apply_constraints();
+    return *this;
+}
+
+auto Camera::set_projection_mode(const ProjectionMode projection_mode) noexcept -> Camera&
+{
+    projection_mode_ = projection_mode;
+    return *this;
+}
+
+auto Camera::apply_constraints() noexcept -> void
+{
+    if (!clamp_position_z_min_)
+    {
+        return;
+    }
+    const auto min_offset_z = min_position_z_ - pivot_.z;
+    if (min_offset_z <= -distance_)
+    {
+        return;
+    }
+    const auto min_pitch =
+        std::asin(std::clamp(min_offset_z / std::max(distance_, 0.001f), -1.0f, 1.0f));
+    pitch_ = std::max(pitch_, min_pitch);
+}
 
 auto Camera::position() const noexcept -> Vec3
 {

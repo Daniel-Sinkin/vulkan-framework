@@ -74,6 +74,7 @@ struct TextureResource
     VmaAllocation allocation{VK_NULL_HANDLE};
     VkImageView view{VK_NULL_HANDLE};
     VkSampler sampler{VK_NULL_HANDLE};
+    VkDescriptorSet imgui_descriptor{VK_NULL_HANDLE};
     u32 width{};
     u32 height{};
     VkFormat format{VK_FORMAT_UNDEFINED};
@@ -121,6 +122,51 @@ struct GpuLighting
     Vec4 environment_params{};
     std::array<GpuLight, k_max_lights> lights{};
 };
+
+struct ProjectionModeOption
+{
+    const char* label{};
+    ProjectionMode mode{};
+};
+
+constexpr std::array k_projection_mode_options{
+    ProjectionModeOption{.label = "Perspective", .mode = ProjectionMode::perspective},
+    ProjectionModeOption{.label = "Orthographic", .mode = ProjectionMode::orthographic},
+};
+
+[[nodiscard]] constexpr auto projection_label(const ProjectionMode mode) noexcept -> const char*
+{
+    switch (mode)
+    {
+        case ProjectionMode::perspective:
+            return "Perspective";
+        case ProjectionMode::orthographic:
+            return "Orthographic";
+    }
+    return "Perspective";
+}
+
+auto draw_projection_mode_combo(Camera& camera) -> void
+{
+    if (!ImGui::BeginCombo("Projection", projection_label(camera.projection_mode())))
+    {
+        return;
+    }
+
+    for (const auto& option : k_projection_mode_options)
+    {
+        const auto selected = camera.projection_mode() == option.mode;
+        if (ImGui::Selectable(option.label, selected))
+        {
+            camera.set_projection_mode(option.mode);
+        }
+        if (selected)
+        {
+            ImGui::SetItemDefaultFocus();
+        }
+    }
+    ImGui::EndCombo();
+}
 
 struct DepthAttachment
 {
@@ -936,6 +982,10 @@ struct Runtime::Impl
     auto load_texture(const std::filesystem::path&, const TextureLoadConfig&) -> TextureHandle;
     auto load_hdr_texture(const std::filesystem::path&, const HdrTextureLoadConfig&)
         -> TextureHandle;
+    auto
+    upload_texture_rgba(std::span<const ColorU8>, u32 width, u32 height, const TextureLoadConfig&)
+        -> TextureHandle;
+    auto imgui_texture_id(TextureHandle) -> uptr;
     auto ensure_debug_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_debug_on_top_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
     auto ensure_mesh_material_buffer(usize frame_index, VkDeviceSize size) -> Buffer&;
@@ -1254,6 +1304,10 @@ auto Runtime::Impl::create_default_texture() -> void
 
 auto Runtime::Impl::destroy_texture(TextureResource& texture) noexcept -> void
 {
+    if (texture.imgui_descriptor != VK_NULL_HANDLE and imgui_ready)
+    {
+        ImGui_ImplVulkan_RemoveTexture(texture.imgui_descriptor);
+    }
     if (texture.sampler != VK_NULL_HANDLE)
     {
         vkDestroySampler(device, texture.sampler, allocation_callbacks);
@@ -1318,6 +1372,70 @@ auto Runtime::Impl::load_texture(
     }
     update_mesh_texture_descriptors();
     return TextureHandle{.id = index};
+}
+
+auto Runtime::Impl::upload_texture_rgba(
+    std::span<const ColorU8> pixels,
+    const u32 width,
+    const u32 height,
+    const TextureLoadConfig& load_config
+) -> TextureHandle
+{
+    if (textures.size() >= k_max_material_textures)
+    {
+        throw std::runtime_error(
+            std::format("ds_vk material texture table is full (max {})", k_max_material_textures)
+        );
+    }
+    if (width == 0u or height == 0u or pixels.size() != static_cast<usize>(width) * height)
+    {
+        throw std::runtime_error("invalid RGBA texture upload dimensions");
+    }
+
+    TextureResource texture{};
+    try
+    {
+        const auto format = load_config.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+        texture = create_texture_resource(pixels.data(), width, height, format, 4u);
+    }
+    catch (...)
+    {
+        destroy_texture(texture);
+        throw;
+    }
+
+    const auto index = static_cast<u32>(textures.size());
+    try
+    {
+        textures.push_back(texture);
+    }
+    catch (...)
+    {
+        destroy_texture(texture);
+        throw;
+    }
+    update_mesh_texture_descriptors();
+    return TextureHandle{.id = index};
+}
+
+auto Runtime::Impl::imgui_texture_id(TextureHandle handle) -> uptr
+{
+    if (!handle.valid() or static_cast<usize>(handle.id) >= textures.size())
+    {
+        return {};
+    }
+    auto& texture = textures[handle.id];
+    if (texture.imgui_descriptor == VK_NULL_HANDLE)
+    {
+        if (!imgui_ready)
+        {
+            return {};
+        }
+        texture.imgui_descriptor = ImGui_ImplVulkan_AddTexture(
+            texture.sampler, texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        );
+    }
+    return reinterpret_cast<uptr>(texture.imgui_descriptor);
 }
 
 auto Runtime::Impl::load_hdr_texture(
@@ -3785,30 +3903,51 @@ auto Runtime::Impl::draw_runtime_ui() -> void
     auto fov_degrees = glm::degrees(camera.fov_y());
     if (ImGui::SliderFloat("FOV", &fov_degrees, 10.0f, 120.0f, "%.1f deg"))
     {
-        camera.fov_y() = glm::radians(std::clamp(fov_degrees, 10.0f, 120.0f));
+        camera.set_fov_y(glm::radians(std::clamp(fov_degrees, 10.0f, 120.0f)));
     }
-    if (ImGui::SliderFloat("Orbit sensitivity", &camera.orbit_sensitivity(), 0.10f, 4.0f, "%.2f"))
+    auto orbit_sensitivity = camera.orbit_sensitivity();
+    if (ImGui::SliderFloat("Orbit sensitivity", &orbit_sensitivity, 0.10f, 4.0f, "%.2f"))
     {
-        camera.orbit_sensitivity() = std::clamp(camera.orbit_sensitivity(), 0.10f, 4.0f);
+        camera.set_orbit_sensitivity(std::clamp(orbit_sensitivity, 0.10f, 4.0f));
     }
-    if (ImGui::SliderFloat("Pivot sensitivity", &camera.pivot_sensitivity(), 0.10f, 4.0f, "%.2f"))
+    auto pivot_sensitivity = camera.pivot_sensitivity();
+    if (ImGui::SliderFloat("Pivot sensitivity", &pivot_sensitivity, 0.10f, 4.0f, "%.2f"))
     {
-        camera.pivot_sensitivity() = std::clamp(camera.pivot_sensitivity(), 0.10f, 4.0f);
+        camera.set_pivot_sensitivity(std::clamp(pivot_sensitivity, 0.10f, 4.0f));
     }
-    if (ImGui::SliderFloat("Zoom sensitivity", &camera.zoom_sensitivity(), 0.10f, 4.0f, "%.2f"))
+    auto zoom_sensitivity = camera.zoom_sensitivity();
+    if (ImGui::SliderFloat("Zoom sensitivity", &zoom_sensitivity, 0.10f, 4.0f, "%.2f"))
     {
-        camera.zoom_sensitivity() = std::clamp(camera.zoom_sensitivity(), 0.10f, 4.0f);
+        camera.set_zoom_sensitivity(std::clamp(zoom_sensitivity, 0.10f, 4.0f));
     }
 
-    const std::array projection_labels{"Perspective", "Orthographic"};
-    auto projection_index = camera.projection_mode() == ProjectionMode::orthographic ? 1 : 0;
-    if (ImGui::Combo("Projection", &projection_index, projection_labels.data(), 2))
-    {
-        camera.projection_mode() =
-            projection_index == 1 ? ProjectionMode::orthographic : ProjectionMode::perspective;
-    }
+    draw_projection_mode_combo(camera);
 
-    ImGui::DragFloat3("Pivot", &camera.pivot().x, 0.01f);
+    auto allow_pivot_move = camera.allow_pivot_move();
+    if (ImGui::Checkbox("Allow pivot move", &allow_pivot_move))
+    {
+        camera.set_allow_pivot_move(allow_pivot_move);
+    }
+    auto clamp_camera_z = camera.clamp_position_z_min();
+    if (ImGui::Checkbox("Clamp camera above Z", &clamp_camera_z))
+    {
+        camera.set_clamp_position_z_min(clamp_camera_z);
+    }
+    if (camera.clamp_position_z_min())
+    {
+        auto min_position_z = camera.min_position_z();
+        if (ImGui::DragFloat("Minimum camera Z", &min_position_z, 0.01f))
+        {
+            camera.set_min_position_z(min_position_z);
+        }
+    }
+    ImGui::BeginDisabled(!camera.allow_pivot_move());
+    auto pivot = camera.pivot();
+    if (ImGui::DragFloat3("Pivot", &pivot.x, 0.01f))
+    {
+        camera.set_pivot(pivot);
+    }
+    ImGui::EndDisabled();
     ImGui::Text(
         "Frame %.2f ms | draw %u/%u | debug %u | lights %u",
         static_cast<f64>(stats.last_frame_ms),
@@ -3925,28 +4064,30 @@ auto Runtime::Impl::handle_event(const SDL_Event& event) -> void
         if (orbiting)
         {
             const auto sensitivity = std::clamp(camera.orbit_sensitivity(), 0.10f, 4.0f);
-            camera.yaw() -= event.motion.xrel * 0.006f * sensitivity;
-            camera.pitch() = std::clamp(
-                camera.pitch() + event.motion.yrel * 0.006f * sensitivity,
-                glm::radians(-82.0f),
-                glm::radians(82.0f)
+            camera.set_yaw(camera.yaw() - event.motion.xrel * 0.006f * sensitivity);
+            camera.set_pitch(
+                std::clamp(
+                    camera.pitch() + event.motion.yrel * 0.006f * sensitivity,
+                    glm::radians(-82.0f),
+                    glm::radians(82.0f)
+                )
             );
         }
-        else if (panning)
+        else if (panning and camera.allow_pivot_move())
         {
             const auto sensitivity = std::clamp(camera.pivot_sensitivity(), 0.10f, 4.0f);
-            camera.pivot() += camera.pan_offset_world(
+            camera.translate_pivot(camera.pan_offset_world(
                 event.motion.xrel * sensitivity,
                 event.motion.yrel * sensitivity,
                 static_cast<f32>(std::max(1, framebuffer_height))
-            );
+            ));
         }
     }
     if (event.type == SDL_EVENT_MOUSE_WHEEL and !io.WantCaptureMouse)
     {
         const auto sensitivity = std::clamp(camera.zoom_sensitivity(), 0.10f, 4.0f);
-        camera.distance() *= std::exp(-event.wheel.y * 0.12f * sensitivity);
-        camera.distance() = std::clamp(camera.distance(), 0.12f, 200.0f);
+        const auto distance = camera.distance() * std::exp(-event.wheel.y * 0.12f * sensitivity);
+        camera.set_distance(std::clamp(distance, 0.12f, 200.0f));
     }
 }
 
@@ -4850,6 +4991,21 @@ auto Runtime::load_hdr_texture(
 ) -> TextureHandle
 {
     return impl_->load_hdr_texture(path, config);
+}
+
+auto Runtime::upload_texture_rgba(
+    std::span<const ColorU8> pixels,
+    const u32 width,
+    const u32 height,
+    const TextureLoadConfig& config
+) -> TextureHandle
+{
+    return impl_->upload_texture_rgba(pixels, width, height, config);
+}
+
+auto Runtime::imgui_texture_id(TextureHandle handle) -> uptr
+{
+    return impl_->imgui_texture_id(handle);
 }
 
 auto Runtime::request_screenshot(std::filesystem::path path, const bool transparent) -> void

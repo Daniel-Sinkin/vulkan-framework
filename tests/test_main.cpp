@@ -404,7 +404,7 @@ auto test_gltf_assets() -> void
 auto test_camera_projection() -> void
 {
     ds_vk::Camera camera{};
-    camera.distance() = 3.0f;
+    camera.set_distance(3.0f);
     const auto position = camera.position();
     check(finite_vec3(position), "camera position is finite");
     check(near(glm::length(position - camera.pivot()), 3.0f, 1.0e-4f), "camera distance");
@@ -414,7 +414,7 @@ auto test_camera_projection() -> void
     check(std::isfinite(projection[0][0]), "projection matrix is finite");
     check(projection[1][1] < 0.0f, "projection matrix uses Vulkan inverted Y");
 
-    camera.pitch() = glm::half_pi<ds_vk::f32>();
+    camera.set_pitch(glm::half_pi<ds_vk::f32>());
     check(finite_vec3(camera.right()), "camera right vector is finite at vertical pitch");
     check(finite_vec3(camera.up()), "camera up vector is finite at vertical pitch");
 }

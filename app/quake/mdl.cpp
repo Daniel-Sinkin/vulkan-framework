@@ -2,15 +2,19 @@
 
 #include "app/quake/io.hpp"
 #include "app/quake/paths.hpp"
+#include "ds_vk/assets.hpp"
 #include "ds_vk/math.hpp"
 #include "ds_vk/utility.hpp"
 
 #include <cstring>
+#include <exception>
 #include <format>
 #include <fstream>
+#include <iterator>
 #include <mdspan>
 #include <print>
 #include <queue>
+#include <regex>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -114,6 +118,48 @@ auto find_black_palette_index(const MdlPalette& palette) -> std::optional<u8>
         }
     }
     return std::nullopt;
+}
+
+auto load_alias_normals(const std::filesystem::path& filepath) -> std::optional<std::vector<Vec3>>
+{
+    std::ifstream in{filepath};
+    if (!in)
+    {
+        std::println(stderr, "Failed to open Quake alias normal table {}", filepath.string());
+        return std::nullopt;
+    }
+
+    const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    const std::regex normal_pattern{
+        R"(\{\s*([-+]?[0-9]*\.?[0-9]+)\s*,\s*([-+]?[0-9]*\.?[0-9]+)\s*,\s*([-+]?[0-9]*\.?[0-9]+)\s*\})"
+    };
+
+    std::vector<Vec3> out{};
+    for (auto it = std::sregex_iterator{text.begin(), text.end(), normal_pattern};
+         it != std::sregex_iterator{};
+         ++it)
+    {
+        const auto& match = *it;
+        out.push_back(
+            Vec3{
+                std::stof(match[1].str()),
+                std::stof(match[2].str()),
+                std::stof(match[3].str()),
+            }
+        );
+    }
+
+    if (out.size() != 162zu)
+    {
+        std::println(
+            stderr,
+            "Invalid Quake alias normal table {}: expected 162 entries, got {}",
+            filepath.string(),
+            out.size()
+        );
+        return std::nullopt;
+    }
+    return out;
 }
 
 [[nodiscard]] auto to_string(const MdlHeader& header) -> std::string
@@ -245,7 +291,8 @@ texcoord_for_vertex(const MdlHeader& header, const MdlVertex& vertex, const MdlT
     const MdlHeader& header,
     std::span<const MdlVertex> stverts,
     std::span<const MdlTriangle> triangles,
-    const MdlFrame& frame
+    const MdlFrame& frame,
+    std::span<const Vec3> alias_normals
 ) -> std::optional<MeshData>
 {
     if (stverts.size() != static_cast<usize>(header.num_verts)
@@ -263,6 +310,7 @@ texcoord_for_vertex(const MdlHeader& header, const MdlVertex& vertex, const MdlT
     {
         std::array<Vec3, 3> positions{};
         std::array<Vec2, 3> texcoords{};
+        std::array<Vec3, 3> vertex_normals{};
         for (auto corner = 0zu; corner < 3zu; ++corner)
         {
             const auto vertex_idx = triangle.vertex_indices[corner];
@@ -275,14 +323,21 @@ texcoord_for_vertex(const MdlHeader& header, const MdlVertex& vertex, const MdlT
             const auto idx = static_cast<usize>(vertex_idx);
             positions[corner] = dequantize_position(header, frame.vertices[idx]);
             texcoords[corner] = texcoord_for_vertex(header, stverts[idx], triangle);
+            const auto normal_idx = static_cast<usize>(frame.vertices[idx].light_normal_index);
+            vertex_normals[corner] = normal_idx < alias_normals.size()
+                                         ? normalize_or(alias_normals[normal_idx], k_axis_z)
+                                         : Vec3{};
         }
 
-        const auto normal = normalize_or(
+        const auto face_normal = normalize_or(
             glm::cross(positions[1] - positions[0], positions[2] - positions[0]), k_axis_z
         );
         const auto base = static_cast<u32>(out.vertices.size());
         for (auto corner = 0zu; corner < 3zu; ++corner)
         {
+            const auto normal = glm::dot(vertex_normals[corner], vertex_normals[corner]) > 0.0f
+                                    ? vertex_normals[corner]
+                                    : face_normal;
             out.vertices.push_back(
                 Vertex{
                     .position = positions[corner],
@@ -561,6 +616,138 @@ auto save_mdl_skins_to_file(
         }
     }
     return written;
+}
+
+[[nodiscard]] auto
+skin_to_rgba(const MdlSkinData& skin, const MdlHeader& header, const MdlPalette& palette)
+    -> std::vector<ColorU8>
+{
+    std::vector<ColorU8> out{};
+    out.reserve(skin.size());
+    const auto expected_size =
+        static_cast<usize>(header.skin_width) * static_cast<usize>(header.skin_height);
+    if (skin.size() != expected_size)
+    {
+        return out;
+    }
+    for (const auto palette_index : skin)
+    {
+        const auto& entry = palette[palette_index];
+        out.push_back(ColorU8{entry.r, entry.g, entry.b, 255u});
+    }
+    return out;
+}
+
+[[nodiscard]] auto
+frame_name_for_gltf(std::string_view model_name, const MdlFrame& frame, usize frame_index)
+    -> std::string
+{
+    auto name_length = 0zu;
+    while (name_length < frame.name.size() and frame.name[name_length] != '\0')
+    {
+        ++name_length;
+    }
+    const std::string frame_name{frame.name.data(), name_length};
+    if (frame_name.empty())
+    {
+        return std::format("{}_frame_{:03}", model_name, frame_index);
+    }
+    return std::format("{}_frame_{:03}_{}", model_name, frame_index, frame_name);
+}
+
+auto save_mdl_as_gltf(
+    const MdlBinary& mdl,
+    std::string_view name,
+    const std::filesystem::path& output_path,
+    std::span<const Vec3> alias_normals
+) -> bool
+{
+    std::vector<GltfImageData> images{};
+    std::vector<GltfMaterialData> materials{};
+    for (auto skin_idx = 0zu; skin_idx < mdl.skins.size(); ++skin_idx)
+    {
+        const auto& skin = mdl.skins[skin_idx];
+        for (auto image_idx = 0zu; image_idx < skin.images.size(); ++image_idx)
+        {
+            auto pixels = skin_to_rgba(skin.images[image_idx], mdl.header, mdl.palette);
+            if (pixels.empty())
+            {
+                std::println(
+                    stderr, "Skipping invalid skin {}:{} for {}", skin_idx, image_idx, name
+                );
+                continue;
+            }
+            const auto image_name = skin.images.size() == 1zu
+                                        ? std::format("{}_skin_{}", name, skin_idx)
+                                        : std::format("{}_skin_{}_{}", name, skin_idx, image_idx);
+            const auto image_asset_index = images.size();
+            images.push_back(
+                GltfImageData{
+                    .name = image_name,
+                    .width = static_cast<u32>(mdl.header.skin_width),
+                    .height = static_cast<u32>(mdl.header.skin_height),
+                    .pixels = std::move(pixels),
+                }
+            );
+            materials.push_back(
+                GltfMaterialData{
+                    .name = image_name,
+                    .base_color = Color::white,
+                    .base_color_image = image_asset_index,
+                    .roughness = 1.0f,
+                    .double_sided = true,
+                }
+            );
+        }
+    }
+    if (materials.empty())
+    {
+        materials.push_back(GltfMaterialData{.name = std::format("{}_material", name)});
+    }
+
+    std::vector<GltfMeshData> meshes{};
+    meshes.reserve(mdl.frames.size());
+    for (auto frame_idx = 0zu; frame_idx < mdl.frames.size(); ++frame_idx)
+    {
+        auto mesh = make_mesh_data(
+            mdl.header, mdl.stverts, mdl.triangles, mdl.frames[frame_idx], alias_normals
+        );
+        if (!mesh)
+        {
+            std::println(stderr, "Skipping unconvertible frame {} for {}", frame_idx, name);
+            continue;
+        }
+        meshes.push_back(
+            GltfMeshData{
+                .name = frame_name_for_gltf(name, mdl.frames[frame_idx], frame_idx),
+                .mesh = std::move(*mesh),
+                .material = 0zu,
+                .visible_in_default_scene = frame_idx == 0zu,
+            }
+        );
+    }
+    if (meshes.empty())
+    {
+        std::println(stderr, "No glTF meshes generated for {}", name);
+        return false;
+    }
+
+    try
+    {
+        write_gltf_scene(
+            output_path,
+            meshes,
+            materials,
+            images,
+            GltfWriteConfig{.generator = "ds_vk Quake MDL exporter"}
+        );
+    }
+    catch (const std::exception& e)
+    {
+        std::println(stderr, "Failed to write glTF {}: {}", output_path.string(), e.what());
+        return false;
+    }
+    return true;
 }
 
 auto parse_mdl_binary(const std::filesystem::path& filepath) -> std::optional<MdlBinary>

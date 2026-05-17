@@ -61,6 +61,7 @@ const uint DEBUG_SCALAR_HEATMAP = 3;
 const uint DEBUG_NORMAL = 4;
 const uint DEBUG_OBJECT_ID = 5;
 const uint DEBUG_CAMERA_DEPTH = 6;
+const uint DEBUG_TRIANGLE_SELECTED_PULSE = 7;
 const uint LIGHT_DIRECTIONAL = 0;
 const uint LIGHT_RADIAL = 1;
 const uint LIGHT_SPOT = 2;
@@ -294,6 +295,14 @@ vec3 environment_light(
     return (diffuse + specular) * params.x * ambient_occlusion;
 }
 
+vec3 apply_selected_pulse(vec3 shaded_color, Material material)
+{
+    float time = material.debug_params2.x;
+    float wave = 0.5 + 0.5 * sin((gl_FragCoord.x + gl_FragCoord.y) * 0.045 + time * 5.5);
+    float amount = clamp(0.28 + 0.42 * wave, 0.0, 1.0) * material.debug_color.a;
+    return mix(shaded_color, material.debug_color.rgb, amount);
+}
+
 vec3 apply_debug(vec3 shaded_color, vec3 normal, Material material)
 {
     uint mode = uint(material.debug_params.x + 0.5);
@@ -326,13 +335,13 @@ vec3 apply_debug(vec3 shaded_color, vec3 normal, Material material)
         float depth = smoothstep(near_depth, far_depth, camera_depth);
         result = vec3(depth);
     }
-
     if (mode == DEBUG_SELECTED_PULSE || material.debug_params2.z > 0.5)
     {
-        float time = material.debug_params2.x;
-        float wave = 0.5 + 0.5 * sin((gl_FragCoord.x + gl_FragCoord.y) * 0.045 + time * 5.5);
-        float amount = clamp(0.28 + 0.42 * wave, 0.0, 1.0) * material.debug_color.a;
-        result = mix(result, material.debug_color.rgb, amount);
+        result = apply_selected_pulse(result, material);
+    }
+    else if (mode == DEBUG_TRIANGLE_SELECTED_PULSE)
+    {
+        result = apply_selected_pulse(result, material);
     }
     return result;
 }

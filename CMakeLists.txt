@@ -221,6 +221,7 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
   target_link_libraries(vma PUBLIC Vulkan::Vulkan)
 
   add_library(ds_vk STATIC
+    ds_vk/assets_write.cpp
     ds_vk/runtime.cpp
     ds_vk/stb_image_impl.cpp
     ds_vk/stb_image_write_impl.cpp
@@ -235,6 +236,7 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     ${CMAKE_CURRENT_SOURCE_DIR}
   )
   target_include_directories(ds_vk SYSTEM PRIVATE
+    external
     external/stb
   )
   target_compile_definitions(ds_vk PRIVATE
@@ -290,7 +292,9 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     app/quake/quake_app.cpp
   )
   target_compile_definitions(ds_vk_quake_app PRIVATE
+    DS_VK_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
     DS_VK_QUAKE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app/quake/assets"
+    DS_VK_QUAKE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../Quake/WinQuake"
   )
   target_link_libraries(ds_vk_quake_app PRIVATE
     ds_vk

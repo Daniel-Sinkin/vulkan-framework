@@ -53,6 +53,7 @@ enum class MeshDebugMode : u8
     normal = 4,
     object_id = 5,
     camera_depth = 6,
+    triangle_selected_pulse = 7,
 };
 
 struct MeshDebugConfig
@@ -383,6 +384,8 @@ class Runtime
     [[nodiscard]] auto replace_mesh(MeshHandle, const MeshData&) -> MeshHandle;
     [[nodiscard]] auto load_texture(const std::filesystem::path&, const TextureLoadConfig& = {}) -> TextureHandle;
     [[nodiscard]] auto load_hdr_texture(const std::filesystem::path&, const HdrTextureLoadConfig& = {}) -> TextureHandle;
+    [[nodiscard]] auto upload_texture_rgba(std::span<const ColorU8>, u32 width, u32 height, const TextureLoadConfig& = {}) -> TextureHandle;
+    [[nodiscard]] auto imgui_texture_id(TextureHandle) -> uptr;
     auto request_screenshot(std::filesystem::path path, bool transparent = false) -> void;
 
     auto camera(const CameraConfig&)                       noexcept -> Camera&;

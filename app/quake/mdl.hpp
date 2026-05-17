@@ -125,9 +125,15 @@ struct MdlBinary
 [[nodiscard]] auto to_string(const MdlHeader&) -> std::string;
 [[nodiscard]] auto load_quake_palette() -> std::optional<MdlPalette>;
 [[nodiscard]] auto find_black_palette_index(const MdlPalette&) -> std::optional<u8>;
+[[nodiscard]] auto load_alias_normals(const std::filesystem::path&)
+    -> std::optional<std::vector<Vec3>>;
 
 [[nodiscard]] auto make_mesh_data(
-    const MdlHeader&, std::span<const MdlVertex>, std::span<const MdlTriangle>, const MdlFrame&
+    const MdlHeader&,
+    std::span<const MdlVertex>,
+    std::span<const MdlTriangle>,
+    const MdlFrame&,
+    std::span<const Vec3> alias_normals = {}
 ) -> std::optional<MeshData>;
 
 [[nodiscard]] auto parse_mdl_binary(const std::filesystem::path&) -> std::optional<MdlBinary>;
@@ -135,4 +141,10 @@ struct MdlBinary
     const std::vector<MdlSkin>&, const MdlHeader&, const MdlPalette&, std::string_view
 ) -> usize;
 [[nodiscard]] auto save_quake_palette_to_file(const MdlPalette&) -> bool;
+[[nodiscard]] auto save_mdl_as_gltf(
+    const MdlBinary&,
+    std::string_view name,
+    const std::filesystem::path&,
+    std::span<const Vec3> alias_normals
+) -> bool;
 }  // namespace ds_vk_quake
