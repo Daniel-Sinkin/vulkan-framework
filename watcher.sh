@@ -19,6 +19,7 @@ fi
 watch_args=(
     --restart
     --quiet
+    --clear=reset
     --postpone
     --stop-signal SIGTERM
     --stop-timeout 2s
@@ -39,6 +40,7 @@ if [[ "${app_name}" == "quake" || "${app_name}" == "vk_quake" ]]; then
     watch_args=(
         --restart
         --quiet
+        --clear=reset
         --postpone
         --stop-signal SIGTERM
         --stop-timeout 2s
