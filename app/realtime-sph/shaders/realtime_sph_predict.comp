@@ -30,8 +30,20 @@ struct SimStats
     uint nan_count;
     uint max_neighbors;
     uint max_speed_milli;
-    uint reserved0;
-    uint reserved1;
+    int sum_position_x_milli;
+    int sum_position_y_milli;
+    int sum_position_z_milli;
+    int sum_velocity_x_milli;
+    int sum_velocity_y_milli;
+    int sum_velocity_z_milli;
+    int min_position_x_milli;
+    int min_position_y_milli;
+    int min_position_z_milli;
+    int max_position_x_milli;
+    int max_position_y_milli;
+    int max_position_z_milli;
+    uint invalid_events;
+    uint overflow_events;
 };
 
 layout(std430, set = 0, binding = 0) buffer Particles
@@ -85,12 +97,14 @@ void main()
     vec3 v = p.velocity_lambda.xyz + params.gravity_rest_density.xyz * dt;
     vec3 x = p.position_radius.xyz + v * dt;
 
-    if (invalid_vec3(x) || invalid_vec3(v) || any(lessThan(x, params.domain_min_dt.xyz - vec3(0.25))) ||
-        any(greaterThan(x, params.domain_max_radius.xyz + vec3(0.25))))
+    if (invalid_vec3(x) || invalid_vec3(v)
+        || any(lessThan(x, params.domain_min_dt.xyz - vec3(0.25)))
+        || any(greaterThan(x, params.domain_max_radius.xyz + vec3(0.25))))
     {
         x = respawn_position(id);
         v = vec3(0.0);
         atomicAdd(stats.escaped, 1u);
+        atomicAdd(stats.invalid_events, 1u);
         if (invalid_vec3(p.position_radius.xyz) || invalid_vec3(p.velocity_lambda.xyz))
         {
             atomicAdd(stats.nan_count, 1u);

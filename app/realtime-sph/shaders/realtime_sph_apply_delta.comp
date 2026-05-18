@@ -1,0 +1,51 @@
+#version 450
+
+layout(local_size_x = 128) in;
+
+struct Particle
+{
+    vec4 position_radius;
+    vec4 previous_density;
+    vec4 velocity_lambda;
+    vec4 delta_neighbors;
+};
+
+struct SimParams
+{
+    vec4 domain_min_dt;
+    vec4 domain_max_radius;
+    vec4 gravity_rest_density;
+    vec4 kernel_poly6_spiky;
+    vec4 pbf_params;
+    vec4 viscosity_vorticity;
+    uvec4 counts;
+    uvec4 grid_size;
+};
+
+layout(std430, set = 0, binding = 0) buffer Particles
+{
+    Particle particles[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer ParamsBuffer
+{
+    SimParams params;
+};
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= params.counts.x)
+    {
+        return;
+    }
+
+    Particle p = particles[id];
+    const float radius = params.domain_max_radius.w;
+    p.position_radius.xyz += p.delta_neighbors.xyz;
+    p.position_radius.xyz = clamp(
+        p.position_radius.xyz,
+        params.domain_min_dt.xyz + vec3(radius),
+        params.domain_max_radius.xyz - vec3(radius)
+    );
+    particles[id] = p;
+}

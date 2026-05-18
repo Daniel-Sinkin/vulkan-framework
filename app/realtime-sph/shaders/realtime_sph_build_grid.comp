@@ -30,8 +30,20 @@ struct SimStats
     uint nan_count;
     uint max_neighbors;
     uint max_speed_milli;
-    uint reserved0;
-    uint reserved1;
+    int sum_position_x_milli;
+    int sum_position_y_milli;
+    int sum_position_z_milli;
+    int sum_velocity_x_milli;
+    int sum_velocity_y_milli;
+    int sum_velocity_z_milli;
+    int min_position_x_milli;
+    int min_position_y_milli;
+    int min_position_z_milli;
+    int max_position_x_milli;
+    int max_position_y_milli;
+    int max_position_z_milli;
+    uint invalid_events;
+    uint overflow_events;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Particles
@@ -83,5 +95,7 @@ void main()
     else
     {
         atomicAdd(stats.overflow, 1u);
+        atomicAdd(stats.overflow_events, 1u);
+        atomicAdd(stats.invalid_events, 1u);
     }
 }

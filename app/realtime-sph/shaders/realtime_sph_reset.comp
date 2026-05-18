@@ -22,8 +22,20 @@ struct SimStats
     uint nan_count;
     uint max_neighbors;
     uint max_speed_milli;
-    uint reserved0;
-    uint reserved1;
+    int sum_position_x_milli;
+    int sum_position_y_milli;
+    int sum_position_z_milli;
+    int sum_velocity_x_milli;
+    int sum_velocity_y_milli;
+    int sum_velocity_z_milli;
+    int min_position_x_milli;
+    int min_position_y_milli;
+    int min_position_z_milli;
+    int max_position_x_milli;
+    int max_position_y_milli;
+    int max_position_z_milli;
+    uint invalid_events;
+    uint overflow_events;
 };
 
 layout(std430, set = 0, binding = 1) buffer CellCounts
@@ -54,7 +66,17 @@ void main()
         stats.nan_count = 0u;
         stats.max_neighbors = 0u;
         stats.max_speed_milli = 0u;
-        stats.reserved0 = 0u;
-        stats.reserved1 = 0u;
+        stats.sum_position_x_milli = 0;
+        stats.sum_position_y_milli = 0;
+        stats.sum_position_z_milli = 0;
+        stats.sum_velocity_x_milli = 0;
+        stats.sum_velocity_y_milli = 0;
+        stats.sum_velocity_z_milli = 0;
+        stats.min_position_x_milli = 2147483647;
+        stats.min_position_y_milli = 2147483647;
+        stats.min_position_z_milli = 2147483647;
+        stats.max_position_x_milli = -2147483647;
+        stats.max_position_y_milli = -2147483647;
+        stats.max_position_z_milli = -2147483647;
     }
 }

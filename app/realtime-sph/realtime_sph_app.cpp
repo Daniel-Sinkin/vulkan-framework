@@ -16,7 +16,6 @@
 #include <iostream>
 #include <numbers>
 #include <optional>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -85,21 +84,42 @@ struct GpuStats
     u32 nan_count{};
     u32 max_neighbors{};
     u32 max_speed_milli{};
-    u32 reserved0{};
-    u32 reserved1{};
+    i32 sum_position_x_milli{};
+    i32 sum_position_y_milli{};
+    i32 sum_position_z_milli{};
+    i32 sum_velocity_x_milli{};
+    i32 sum_velocity_y_milli{};
+    i32 sum_velocity_z_milli{};
+    i32 min_position_x_milli{};
+    i32 min_position_y_milli{};
+    i32 min_position_z_milli{};
+    i32 max_position_x_milli{};
+    i32 max_position_y_milli{};
+    i32 max_position_z_milli{};
+    u32 invalid_events{};
+    u32 overflow_events{};
 };
 
 static_assert(sizeof(GpuParticle) == 64zu);
 static_assert(sizeof(GpuSimParams) == 128zu);
-static_assert(sizeof(GpuStats) == 32zu);
+static_assert(sizeof(GpuStats) == 80zu);
 
 struct FrameResources
 {
     Buffer sim_params{};
     Buffer render_params{};
     Buffer stats{};
+    VkQueryPool profile_queries{VK_NULL_HANDLE};
+    bool profile_queries_written{};
     VkDescriptorSet compute_descriptor{VK_NULL_HANDLE};
     VkDescriptorSet render_descriptor{VK_NULL_HANDLE};
+};
+
+enum class Scenario : u8
+{
+    dam_break = 0u,
+    no_gravity_cube = 1u,
+    opposing_cubes = 2u,
 };
 
 struct SimulationSettings
@@ -107,19 +127,21 @@ struct SimulationSettings
     u32 target_particles{k_default_particles};
     f32 particle_radius{0.025f};
     f32 support_radius{0.10f};
-    f32 fixed_dt{1.0f / 120.0f};
-    u32 solver_iterations{4u};
-    u32 max_substeps_per_frame{4u};
+    f32 fixed_dt{0.005f};
+    u32 solver_iterations{5u};
+    u32 max_substeps_per_frame{8u};
     f32 simulation_speed{1.0f};
     f32 speed_color_mix{0.55f};
     f32 render_radius_scale{1.0f};
+    Vec3 gravity{0.0f, 0.0f, -9.81f};
+    Scenario scenario{Scenario::dam_break};
     bool paused{};
 };
 
 struct Domain
 {
-    Vec3 min{-3.5f, -2.2f, 0.0f};
-    Vec3 max{3.7f, 2.4f, 2.8f};
+    Vec3 min{};
+    Vec3 max{};
 };
 
 [[nodiscard]] auto ceil_div(u32 value, u32 divisor) noexcept -> u32
@@ -136,8 +158,9 @@ auto check_vk(VkResult result, std::string_view label) -> void
 {
     if (result != VK_SUCCESS)
     {
-        throw std::runtime_error(std::string{label} + " failed with VkResult "
-                                 + std::to_string(static_cast<int>(result)));
+        throw std::runtime_error(
+            std::string{label} + " failed with VkResult " + std::to_string(static_cast<int>(result))
+        );
     }
 }
 
@@ -214,8 +237,8 @@ auto destroy_buffer(VmaAllocator allocator, Buffer& buffer) noexcept -> void
     allocation_info.usage = VMA_MEMORY_USAGE_AUTO;
     if (mapped)
     {
-        allocation_info.flags =
-            VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+        allocation_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT
+                                | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
     }
 
     VmaAllocationInfo allocation_result{};
@@ -292,11 +315,12 @@ auto write_mapped_bytes(VmaAllocator allocator, Buffer& buffer, const void* data
         {
             for (auto x = -radius; x <= radius; ++x)
             {
-                const auto offset = spacing * Vec3{
-                                               static_cast<f32>(x),
-                                               static_cast<f32>(y),
-                                               static_cast<f32>(z),
-                                           };
+                const auto offset = spacing
+                                    * Vec3{
+                                        static_cast<f32>(x),
+                                        static_cast<f32>(y),
+                                        static_cast<f32>(z),
+                                    };
                 density += poly6_value(glm::dot(offset, offset), h);
             }
         }
@@ -323,46 +347,193 @@ auto write_mapped_bytes(VmaAllocator allocator, Buffer& buffer, const void* data
     -> std::vector<GpuParticle>
 {
     const auto spacing = 2.0f * settings.particle_radius;
-    constexpr Vec3 block_min{-2.55f, -0.95f, 0.08f};
-    constexpr u32 nx{28u};
-    constexpr u32 ny{38u};
-    const auto nz = ceil_div(settings.target_particles, nx * ny);
     auto particles = std::vector<GpuParticle>{};
     particles.reserve(settings.target_particles);
 
-    for (auto z = 0u; z < nz && particles.size() < settings.target_particles; ++z)
+    const auto push_particle = [&](Vec3 position, Vec3 velocity)
     {
-        for (auto y = 0u; y < ny && particles.size() < settings.target_particles; ++y)
+        particles.push_back(
+            GpuParticle{
+                .position_radius = Vec4{position, settings.particle_radius},
+                .previous_density = Vec4{position, 0.0f},
+                .velocity_lambda = Vec4{velocity, 0.0f},
+                .delta_neighbors = Vec4{0.0f},
+            }
+        );
+    };
+    const auto push_block = [&](Vec3 block_min, u32 nx, u32 ny, u32 target, Vec3 velocity)
+    {
+        const auto nz = ceil_div(target, nx * ny);
+        for (auto z = 0u; z < nz && particles.size() < settings.target_particles; ++z)
         {
-            for (auto x = 0u; x < nx && particles.size() < settings.target_particles; ++x)
+            for (auto y = 0u; y < ny && particles.size() < settings.target_particles; ++y)
             {
-                const auto jitter = Vec3{
-                    static_cast<f32>((x * 17u + y * 3u + z * 11u) % 7u) * 0.00035f,
-                    static_cast<f32>((x * 5u + y * 13u + z * 2u) % 5u) * 0.00030f,
-                    0.0f,
-                };
-                const auto position = block_min + spacing * Vec3{
-                                                       static_cast<f32>(x),
-                                                       static_cast<f32>(y),
-                                                       static_cast<f32>(z),
-                                                   }
-                                      + jitter;
-                particles.push_back(GpuParticle{
-                    .position_radius = Vec4{position, settings.particle_radius},
-                    .previous_density = Vec4{position, 0.0f},
-                    .velocity_lambda = Vec4{0.0f},
-                    .delta_neighbors = Vec4{0.0f},
-                });
+                for (auto x = 0u; x < nx && particles.size() < settings.target_particles; ++x)
+                {
+                    const auto jitter = Vec3{
+                        static_cast<f32>((x * 17u + y * 3u + z * 11u) % 7u) * 0.00035f,
+                        static_cast<f32>((x * 5u + y * 13u + z * 2u) % 5u) * 0.00030f,
+                        0.0f,
+                    };
+                    const auto position = block_min + spacing * Vec3{
+                                                           static_cast<f32>(x),
+                                                           static_cast<f32>(y),
+                                                           static_cast<f32>(z),
+                                                       }
+                                          + jitter;
+                    push_particle(position, velocity);
+                }
             }
         }
+    };
+
+    switch (settings.scenario)
+    {
+        case Scenario::dam_break:
+            push_block(
+                Vec3{-2.55f, -0.95f, 0.08f}, 28u, 38u, settings.target_particles, Vec3{0.0f}
+            );
+            break;
+        case Scenario::no_gravity_cube:
+            push_block(
+                Vec3{-0.55f, -0.55f, 0.72f}, 22u, 22u, settings.target_particles, Vec3{0.0f}
+            );
+            break;
+        case Scenario::opposing_cubes:
+            {
+                const auto half = settings.target_particles / 2u;
+                push_block(Vec3{-1.35f, -0.55f, 0.68f}, 16u, 18u, half, Vec3{1.25f, 0.0f, 0.0f});
+                push_block(
+                    Vec3{0.55f, -0.55f, 0.68f},
+                    16u,
+                    18u,
+                    settings.target_particles - half,
+                    Vec3{-1.25f, 0.0f, 0.0f}
+                );
+                break;
+            }
     }
     return particles;
+}
+
+[[nodiscard]] auto center_of_mass_from_stats(const GpuStats& stats) noexcept -> Vec3
+{
+    const auto inv_count = stats.active == 0u ? 0.0f : 1.0f / static_cast<f32>(stats.active);
+    return Vec3{
+        static_cast<f32>(stats.sum_position_x_milli) * 0.001f * inv_count,
+        static_cast<f32>(stats.sum_position_y_milli) * 0.001f * inv_count,
+        static_cast<f32>(stats.sum_position_z_milli) * 0.001f * inv_count,
+    };
+}
+
+[[nodiscard]] auto min_position_from_stats(const GpuStats& stats) noexcept -> Vec3
+{
+    if (stats.active == 0u || stats.min_position_x_milli == 2147483647)
+    {
+        return Vec3{0.0f};
+    }
+    return Vec3{
+        static_cast<f32>(stats.min_position_x_milli) * 0.001f,
+        static_cast<f32>(stats.min_position_y_milli) * 0.001f,
+        static_cast<f32>(stats.min_position_z_milli) * 0.001f,
+    };
+}
+
+[[nodiscard]] auto max_position_from_stats(const GpuStats& stats) noexcept -> Vec3
+{
+    if (stats.active == 0u || stats.max_position_x_milli == -2147483647)
+    {
+        return Vec3{0.0f};
+    }
+    return Vec3{
+        static_cast<f32>(stats.max_position_x_milli) * 0.001f,
+        static_cast<f32>(stats.max_position_y_milli) * 0.001f,
+        static_cast<f32>(stats.max_position_z_milli) * 0.001f,
+    };
+}
+
+[[nodiscard]] auto scenario_name(Scenario scenario) noexcept -> const char*
+{
+    switch (scenario)
+    {
+        case Scenario::dam_break:
+            return "Dam break";
+        case Scenario::no_gravity_cube:
+            return "No-gravity cube";
+        case Scenario::opposing_cubes:
+            return "Opposing cubes";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] auto scenario_cli_name(Scenario scenario) noexcept -> const char*
+{
+    switch (scenario)
+    {
+        case Scenario::dam_break:
+            return "dam-break";
+        case Scenario::no_gravity_cube:
+            return "no-gravity-cube";
+        case Scenario::opposing_cubes:
+            return "opposing-cubes";
+    }
+    return "unknown";
+}
+
+auto apply_scenario_defaults(SimulationSettings& settings) noexcept -> void
+{
+    if (settings.scenario == Scenario::no_gravity_cube
+        || settings.scenario == Scenario::opposing_cubes)
+    {
+        settings.gravity = Vec3{0.0f};
+        return;
+    }
+    settings.gravity = Vec3{0.0f, 0.0f, -9.81f};
+}
+
+[[nodiscard]] auto make_default_domain(const SimulationSettings& settings) noexcept -> Domain
+{
+    switch (settings.scenario)
+    {
+        case Scenario::dam_break:
+            if (settings.target_particles <= 25000u)
+            {
+                return Domain{
+                    .min = Vec3{-2.75f, -1.15f, 0.0f},
+                    .max = Vec3{1.15f, 1.15f, 2.2f},
+                };
+            }
+            return Domain{
+                .min = Vec3{-2.75f, -1.35f, 0.0f},
+                .max = Vec3{2.25f, 1.35f, 2.8f},
+            };
+        case Scenario::no_gravity_cube:
+            return Domain{
+                .min = Vec3{-1.4f, -1.4f, 0.0f},
+                .max = Vec3{1.4f, 1.4f, 1.8f},
+            };
+        case Scenario::opposing_cubes:
+            return Domain{
+                .min = Vec3{-2.0f, -1.2f, 0.0f},
+                .max = Vec3{2.0f, 1.2f, 1.8f},
+            };
+    }
+    return Domain{
+        .min = Vec3{-2.75f, -1.15f, 0.0f},
+        .max = Vec3{1.15f, 1.15f, 2.2f},
+    };
+}
+
+[[nodiscard]] auto artificial_pressure_strength(Scenario scenario) noexcept -> f32
+{
+    return scenario == Scenario::dam_break ? 0.001f : 0.0f;
 }
 
 class RealtimeSphApp
 {
   public:
-    explicit RealtimeSphApp(SimulationSettings settings) : settings_(settings)
+    explicit RealtimeSphApp(SimulationSettings settings)
+        : settings_(settings), domain_(make_default_domain(settings))
     {
     }
 
@@ -381,6 +552,7 @@ class RealtimeSphApp
     {
         ensure_resources(frame);
         read_stats(frame);
+        read_gpu_profile(frame);
 
         if (frame.input.space_pressed)
         {
@@ -457,6 +629,7 @@ class RealtimeSphApp
         ImGui::SetNextWindowSize(ImVec2{390.0f, 360.0f}, ImGuiCond_Once);
         if (ImGui::Begin("Realtime SPH"))
         {
+            ImGui::PushItemWidth(210.0f);
             ImGui::Checkbox("Paused", &settings_.paused);
             if (ImGui::Button("Reset"))
             {
@@ -464,13 +637,38 @@ class RealtimeSphApp
             }
             ImGui::SameLine();
             ImGui::Text("%u particles", particle_count_);
+            if (ImGui::BeginCombo("Scenario", scenario_name(settings_.scenario)))
+            {
+                constexpr auto scenarios = std::array{
+                    Scenario::dam_break,
+                    Scenario::no_gravity_cube,
+                    Scenario::opposing_cubes,
+                };
+                for (const auto scenario : scenarios)
+                {
+                    const auto selected = settings_.scenario == scenario;
+                    if (ImGui::Selectable(scenario_name(scenario), selected))
+                    {
+                        settings_.scenario = scenario;
+                        apply_scenario_defaults(settings_);
+                        reset_requested_ = true;
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
             ImGui::SliderFloat("Simulation speed", &settings_.simulation_speed, 0.0f, 2.0f, "%.2f");
             auto iterations = static_cast<int>(settings_.solver_iterations);
             if (ImGui::SliderInt("PBF iterations", &iterations, 1, 8))
             {
                 settings_.solver_iterations = static_cast<u32>(std::max(1, iterations));
             }
-            ImGui::SliderFloat("Render radius", &settings_.render_radius_scale, 0.55f, 1.6f, "%.2f");
+            ImGui::SliderFloat(
+                "Render radius", &settings_.render_radius_scale, 0.55f, 1.6f, "%.2f"
+            );
             ImGui::SliderFloat("Speed coloring", &settings_.speed_color_mix, 0.0f, 1.0f, "%.2f");
             ImGui::Separator();
             ImGui::Text("GPU stats");
@@ -478,10 +676,71 @@ class RealtimeSphApp
             ImGui::Text("grid overflow: %u", last_stats_.overflow);
             ImGui::Text("escaped/teleported: %u", last_stats_.escaped);
             ImGui::Text("max neighbors: %u", last_stats_.max_neighbors);
-            ImGui::Text("max speed: %.3f", static_cast<double>(last_stats_.max_speed_milli) / 1000.0);
+            ImGui::Text(
+                "max speed: %.3f", static_cast<double>(last_stats_.max_speed_milli) / 1000.0
+            );
+            if (timestamp_supported_)
+            {
+                ImGui::Text("GPU step: %.3f ms", last_gpu_sim_ms_);
+            }
+            const auto com = center_of_mass_from_stats(last_stats_);
+            ImGui::Text(
+                "center: %.3f %.3f %.3f",
+                static_cast<double>(com.x),
+                static_cast<double>(com.y),
+                static_cast<double>(com.z)
+            );
+            const auto min_pos = min_position_from_stats(last_stats_);
+            const auto max_pos = max_position_from_stats(last_stats_);
+            const auto span = max_pos - min_pos;
+            ImGui::Text(
+                "span: %.3f %.3f %.3f",
+                static_cast<double>(span.x),
+                static_cast<double>(span.y),
+                static_cast<double>(span.z)
+            );
             ImGui::Text("nan count: %u", last_stats_.nan_count);
+            ImGui::Text("invalid events: %u", last_stats_.invalid_events);
+            ImGui::Text("overflow events: %u", last_stats_.overflow_events);
+            ImGui::PopItemWidth();
         }
         ImGui::End();
+    }
+
+    [[nodiscard]] auto final_stats() const noexcept -> GpuStats
+    {
+        return last_stats_;
+    }
+
+    [[nodiscard]] auto sim_step_count() const noexcept -> u64
+    {
+        return sim_step_index_;
+    }
+
+    [[nodiscard]] auto last_gpu_sim_ms() const noexcept -> double
+    {
+        return last_gpu_sim_ms_;
+    }
+
+    [[nodiscard]] auto observed_invalid_state() const noexcept -> bool
+    {
+        return observed_invalid_state_;
+    }
+
+    [[nodiscard]] auto initial_center() const noexcept -> Vec3
+    {
+        return initial_center_;
+    }
+
+    auto finalize_gpu_results() -> void
+    {
+        if (device_ == VK_NULL_HANDLE || frames_.empty() || !has_recorded_frame_slot_)
+        {
+            return;
+        }
+        vkDeviceWaitIdle(device_);
+        read_stats_for_slot(last_recorded_frame_slot_);
+        read_gpu_profile_for_slot(last_recorded_frame_slot_);
     }
 
     auto shutdown(Runtime&) noexcept -> void
@@ -496,6 +755,11 @@ class RealtimeSphApp
         {
             device_ = frame.device;
             allocator_ = frame.allocator;
+            auto properties = VkPhysicalDeviceProperties{};
+            vkGetPhysicalDeviceProperties(frame.physical_device, &properties);
+            timestamp_period_ns_ = properties.limits.timestampPeriod;
+            timestamp_supported_ = properties.limits.timestampComputeAndGraphics == VK_TRUE
+                                   && timestamp_period_ns_ > 0.0f;
         }
         if (!resources_ready_)
         {
@@ -570,6 +834,17 @@ class RealtimeSphApp
                 true,
                 "realtime sph stats"
             );
+            if (timestamp_supported_)
+            {
+                VkQueryPoolCreateInfo query_info{};
+                query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+                query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                query_info.queryCount = 2u;
+                check_vk(
+                    vkCreateQueryPool(device_, &query_info, nullptr, &frame.profile_queries),
+                    "vkCreateQueryPool realtime sph profile"
+                );
+            }
             const auto zero = GpuStats{};
             write_mapped(allocator_, frame.stats, zero);
         }
@@ -621,7 +896,9 @@ class RealtimeSphApp
         compute_layout_info.bindingCount = static_cast<u32>(compute_bindings.size());
         compute_layout_info.pBindings = compute_bindings.data();
         check_vk(
-            vkCreateDescriptorSetLayout(device_, &compute_layout_info, nullptr, &compute_set_layout_),
+            vkCreateDescriptorSetLayout(
+                device_, &compute_layout_info, nullptr, &compute_set_layout_
+            ),
             "vkCreateDescriptorSetLayout compute"
         );
 
@@ -667,8 +944,10 @@ class RealtimeSphApp
             "vkCreateDescriptorPool realtime sph"
         );
 
-        auto compute_layouts = std::vector<VkDescriptorSetLayout>(frames_.size(), compute_set_layout_);
-        auto render_layouts = std::vector<VkDescriptorSetLayout>(frames_.size(), render_set_layout_);
+        auto compute_layouts =
+            std::vector<VkDescriptorSetLayout>(frames_.size(), compute_set_layout_);
+        auto render_layouts =
+            std::vector<VkDescriptorSetLayout>(frames_.size(), render_set_layout_);
         auto compute_sets = std::vector<VkDescriptorSet>(frames_.size());
         auto render_sets = std::vector<VkDescriptorSet>(frames_.size());
 
@@ -703,8 +982,12 @@ class RealtimeSphApp
     auto update_descriptors(usize frame_index) -> void
     {
         const std::array compute_infos{
-            VkDescriptorBufferInfo{.buffer = particle_buffer_.handle, .offset = 0, .range = particle_buffer_.size},
-            VkDescriptorBufferInfo{.buffer = cell_counts_buffer_.handle, .offset = 0, .range = cell_counts_buffer_.size},
+            VkDescriptorBufferInfo{
+                .buffer = particle_buffer_.handle, .offset = 0, .range = particle_buffer_.size
+            },
+            VkDescriptorBufferInfo{
+                .buffer = cell_counts_buffer_.handle, .offset = 0, .range = cell_counts_buffer_.size
+            },
             VkDescriptorBufferInfo{
                 .buffer = cell_particles_buffer_.handle,
                 .offset = 0,
@@ -733,7 +1016,9 @@ class RealtimeSphApp
         }
 
         const std::array render_infos{
-            VkDescriptorBufferInfo{.buffer = particle_buffer_.handle, .offset = 0, .range = particle_buffer_.size},
+            VkDescriptorBufferInfo{
+                .buffer = particle_buffer_.handle, .offset = 0, .range = particle_buffer_.size
+            },
             VkDescriptorBufferInfo{
                 .buffer = frames_[frame_index].render_params.handle,
                 .offset = 0,
@@ -752,18 +1037,10 @@ class RealtimeSphApp
         }
 
         vkUpdateDescriptorSets(
-            device_,
-            static_cast<u32>(compute_writes.size()),
-            compute_writes.data(),
-            0,
-            nullptr
+            device_, static_cast<u32>(compute_writes.size()), compute_writes.data(), 0, nullptr
         );
         vkUpdateDescriptorSets(
-            device_,
-            static_cast<u32>(render_writes.size()),
-            render_writes.data(),
-            0,
-            nullptr
+            device_, static_cast<u32>(render_writes.size()), render_writes.data(), 0, nullptr
         );
     }
 
@@ -783,6 +1060,7 @@ class RealtimeSphApp
         build_grid_pipeline_ = create_compute_pipeline("realtime_sph_build_grid.comp.spv");
         lambda_pipeline_ = create_compute_pipeline("realtime_sph_lambda.comp.spv");
         delta_pipeline_ = create_compute_pipeline("realtime_sph_delta.comp.spv");
+        apply_delta_pipeline_ = create_compute_pipeline("realtime_sph_apply_delta.comp.spv");
         velocity_pipeline_ = create_compute_pipeline("realtime_sph_velocity.comp.spv");
     }
 
@@ -802,7 +1080,9 @@ class RealtimeSphApp
 
         VkPipeline pipeline{VK_NULL_HANDLE};
         check_vk(
-            vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline),
+            vkCreateComputePipelines(
+                device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline
+            ),
             "vkCreateComputePipelines"
         );
         vkDestroyShaderModule(device_, module, nullptr);
@@ -832,8 +1112,10 @@ class RealtimeSphApp
             );
         }
 
-        const auto vert = create_shader_module(device_, shader_path("realtime_sph_particles.vert.spv"));
-        const auto frag = create_shader_module(device_, shader_path("realtime_sph_particles.frag.spv"));
+        const auto vert =
+            create_shader_module(device_, shader_path("realtime_sph_particles.vert.spv"));
+        const auto frag =
+            create_shader_module(device_, shader_path("realtime_sph_particles.frag.spv"));
         const auto make_stage = [](VkShaderModule module, VkShaderStageFlagBits stage)
         {
             auto create_info = VkPipelineShaderStageCreateInfo{};
@@ -878,7 +1160,7 @@ class RealtimeSphApp
 
         VkPipelineColorBlendAttachmentState color_attachment{};
         color_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-                                         | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+                                          | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         VkPipelineColorBlendStateCreateInfo blend{};
         blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         blend.attachmentCount = 1;
@@ -906,7 +1188,9 @@ class RealtimeSphApp
         pipeline_info.renderPass = frame.main_render_pass;
         pipeline_info.subpass = 0;
         check_vk(
-            vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &render_pipeline_),
+            vkCreateGraphicsPipelines(
+                device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &render_pipeline_
+            ),
             "vkCreateGraphicsPipelines realtime sph particles"
         );
         render_pass_ = frame.main_render_pass;
@@ -921,15 +1205,29 @@ class RealtimeSphApp
             vkDeviceWaitIdle(device_);
         }
         const auto particles = generate_dam_break_particles(settings_);
+        auto position_sum = Vec3{0.0f};
+        for (const auto& particle : particles)
+        {
+            position_sum += Vec3{particle.position_radius};
+        }
+        initial_center_ =
+            particles.empty() ? Vec3{0.0f} : position_sum / static_cast<f32>(particles.size());
         particle_count_ = static_cast<u32>(particles.size());
-        rest_density_ = lattice_rest_density(2.0f * settings_.particle_radius, settings_.support_radius);
+        rest_density_ =
+            lattice_rest_density(2.0f * settings_.particle_radius, settings_.support_radius);
         write_mapped_bytes(
             allocator_,
             particle_buffer_,
             particles.data(),
             byte_size(particles.size(), sizeof(GpuParticle))
         );
+        const auto zero_stats = GpuStats{};
+        for (auto& frame : frames_)
+        {
+            write_mapped(allocator_, frame.stats, zero_stats);
+        }
         last_stats_ = {};
+        observed_invalid_state_ = false;
         accumulator_ = 0.0f;
         sim_step_index_ = 0u;
     }
@@ -940,12 +1238,67 @@ class RealtimeSphApp
         {
             return;
         }
-        auto& stats_buffer = frames_[frame_slot_for(frame)].stats;
+        read_stats_for_slot(frame_slot_for(frame));
+    }
+
+    auto read_stats_for_slot(usize frame_slot) -> void
+    {
+        if (frame_slot >= frames_.size())
+        {
+            return;
+        }
+        auto& stats_buffer = frames_[frame_slot].stats;
         check_vk(
             vmaInvalidateAllocation(allocator_, stats_buffer.allocation, 0, sizeof(GpuStats)),
             "vmaInvalidateAllocation stats"
         );
         std::memcpy(&last_stats_, stats_buffer.mapped, sizeof(GpuStats));
+        observed_invalid_state_ = observed_invalid_state_ || last_stats_.escaped != 0u
+                                  || last_stats_.overflow != 0u || last_stats_.nan_count != 0u
+                                  || last_stats_.invalid_events != 0u;
+    }
+
+    auto read_gpu_profile(FrameContext& frame) -> void
+    {
+        if (frames_.empty())
+        {
+            return;
+        }
+        read_gpu_profile_for_slot(frame_slot_for(frame));
+    }
+
+    auto read_gpu_profile_for_slot(usize frame_slot) -> void
+    {
+        if (!timestamp_supported_ || frame_slot >= frames_.size())
+        {
+            return;
+        }
+        const auto& resources = frames_[frame_slot];
+        const auto query_pool = resources.profile_queries;
+        if (query_pool == VK_NULL_HANDLE || !resources.profile_queries_written)
+        {
+            return;
+        }
+        auto timestamps = std::array<u64, 2>{};
+        const auto result = vkGetQueryPoolResults(
+            device_,
+            query_pool,
+            0u,
+            static_cast<u32>(timestamps.size()),
+            byte_size(timestamps.size(), sizeof(u64)),
+            timestamps.data(),
+            sizeof(u64),
+            VK_QUERY_RESULT_64_BIT
+        );
+        if (result == VK_SUCCESS && timestamps[1] > timestamps[0])
+        {
+            last_gpu_sim_ms_ = static_cast<double>(timestamps[1] - timestamps[0])
+                               * static_cast<double>(timestamp_period_ns_) / 1.0e6;
+        }
+        else if (result != VK_NOT_READY)
+        {
+            check_vk(result, "vkGetQueryPoolResults realtime sph profile");
+        }
     }
 
     auto write_sim_params(FrameContext& frame, f32 dt) -> void
@@ -953,7 +1306,7 @@ class RealtimeSphApp
         const auto params = GpuSimParams{
             .domain_min_dt = Vec4{domain_.min, dt},
             .domain_max_radius = Vec4{domain_.max, settings_.particle_radius},
-            .gravity_rest_density = Vec4{0.0f, 0.0f, -9.81f, rest_density_},
+            .gravity_rest_density = Vec4{settings_.gravity, rest_density_},
             .kernel_poly6_spiky =
                 Vec4{
                     poly6_constant(settings_.support_radius),
@@ -963,13 +1316,19 @@ class RealtimeSphApp
                 },
             .pbf_params =
                 Vec4{
-                    120.0f,
-                    0.0010f,
+                    1.0e-6f,
+                    artificial_pressure_strength(settings_.scenario),
                     0.30f * settings_.support_radius,
                     4.0f,
                 },
-            .viscosity_vorticity = Vec4{0.0f, 0.08f, 0.995f, 9.0f},
-            .counts = glm::uvec4{particle_count_, cell_count_, k_max_particles_per_cell, settings_.solver_iterations},
+            .viscosity_vorticity = Vec4{0.0f, 0.02f, 1.0f, 15.0f},
+            .counts =
+                glm::uvec4{
+                    particle_count_,
+                    cell_count_,
+                    k_max_particles_per_cell,
+                    0u,
+                },
             .grid_size = glm::uvec4{grid_size_, 0u},
         };
         write_mapped(allocator_, frames_[frame_slot_for(frame)].sim_params, params);
@@ -977,24 +1336,25 @@ class RealtimeSphApp
 
     auto write_render_params(FrameContext& frame) -> void
     {
-        const auto aspect =
-            frame.extent.height == 0u ? 1.0f : static_cast<f32>(frame.extent.width) / static_cast<f32>(frame.extent.height);
+        const auto aspect = frame.extent.height == 0u ? 1.0f
+                                                      : static_cast<f32>(frame.extent.width)
+                                                            / static_cast<f32>(frame.extent.height);
         const auto params = GpuRenderParams{
             .view_projection = frame.camera.view_projection_matrix(aspect),
             .view = frame.camera.view_matrix(),
             .projection = frame.camera.projection_matrix(aspect),
             .camera_right = Vec4{frame.camera.right(), 0.0f},
             .camera_up = Vec4{frame.camera.up(), 0.0f},
-            .camera_forward = Vec4{glm::normalize(frame.camera.pivot() - frame.camera.position()), 0.0f},
+            .camera_forward =
+                Vec4{glm::normalize(frame.camera.pivot() - frame.camera.position()), 0.0f},
             .base_color = Vec4{0.05f, 0.58f, 0.85f, 1.0f},
             .light_direction = Vec4{-0.42f, -0.32f, -0.84f, 0.0f},
-            .options =
-                Vec4{
-                    settings_.render_radius_scale,
-                    5.0f,
-                    settings_.speed_color_mix,
-                    0.0f,
-                },
+            .options = Vec4{
+                settings_.render_radius_scale,
+                5.0f,
+                settings_.speed_color_mix,
+                0.0f,
+            },
         };
         write_mapped(allocator_, frames_[frame_slot_for(frame)].render_params, params);
     }
@@ -1002,7 +1362,15 @@ class RealtimeSphApp
     auto record_simulation_step(FrameContext& frame) -> void
     {
         const auto frame_slot = frame_slot_for(frame);
+        last_recorded_frame_slot_ = frame_slot;
+        has_recorded_frame_slot_ = true;
         auto* cmd = frame.command_buffer;
+        const auto query_pool = frames_[frame_slot].profile_queries;
+        if (query_pool != VK_NULL_HANDLE)
+        {
+            vkCmdResetQueryPool(cmd, query_pool, 0u, 2u);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0u);
+        }
         vkCmdBindDescriptorSets(
             cmd,
             VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1015,6 +1383,7 @@ class RealtimeSphApp
         );
 
         bind_and_dispatch(cmd, reset_pipeline_, std::max(cell_count_, particle_count_));
+        compute_barrier(cmd);
         bind_and_dispatch(cmd, predict_pipeline_, particle_count_);
         compute_barrier(cmd);
         bind_and_dispatch(cmd, build_grid_pipeline_, particle_count_);
@@ -1023,10 +1392,19 @@ class RealtimeSphApp
         {
             bind_and_dispatch(cmd, lambda_pipeline_, particle_count_);
             compute_barrier(cmd);
+            // Keep correction and application separate so neighbors are read from one coherent
+            // position field.
             bind_and_dispatch(cmd, delta_pipeline_, particle_count_);
+            compute_barrier(cmd);
+            bind_and_dispatch(cmd, apply_delta_pipeline_, particle_count_);
             compute_barrier(cmd);
         }
         bind_and_dispatch(cmd, velocity_pipeline_, particle_count_);
+        if (query_pool != VK_NULL_HANDLE)
+        {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, query_pool, 1u);
+            frames_[frame_slot].profile_queries_written = true;
+        }
         compute_to_render_barrier(cmd);
     }
 
@@ -1078,19 +1456,23 @@ class RealtimeSphApp
 
     auto configure_scene_draw(FrameContext& frame) -> void
     {
-        frame.draw.set_environment(EnvironmentConfig{
-            .background_color = Color{0.17f, 0.19f, 0.20f, 1.0f},
-            .background_top_color = Color{0.43f, 0.54f, 0.62f, 1.0f},
-            .gradient_background = true,
-        });
+        frame.draw.set_environment(
+            EnvironmentConfig{
+                .background_color = Color{0.17f, 0.19f, 0.20f, 1.0f},
+                .background_top_color = Color{0.43f, 0.54f, 0.62f, 1.0f},
+                .gradient_background = true,
+            }
+        );
         frame.draw.set_ambient_light(Color{0.16f, 0.18f, 0.20f, 1.0f});
-        frame.draw.directional_light(DirectionalLightConfig{
-            .direction = Vec3{-0.42f, -0.32f, -0.84f},
-            .color = Color{0.92f, 0.96f, 1.0f, 1.0f},
-            .intensity = 1.65f,
-            .shadow = {.enabled = false},
-        });
-        (void)viz::draw_aabb(
+        frame.draw.directional_light(
+            DirectionalLightConfig{
+                .direction = Vec3{-0.42f, -0.32f, -0.84f},
+                .color = Color{0.92f, 0.96f, 1.0f, 1.0f},
+                .intensity = 1.65f,
+                .shadow = {.enabled = false},
+            }
+        );
+        (void) viz::draw_aabb(
             frame.draw,
             viz::AabbMarkerConfig{
                 .aabb = Aabb{.min = domain_.min, .max = domain_.max},
@@ -1109,7 +1491,8 @@ class RealtimeSphApp
 
     [[nodiscard]] auto frame_slot_for(FrameContext& frame) const -> usize
     {
-        return static_cast<usize>(frame.swapchain_image_index) % std::max<usize>(1zu, frames_.size());
+        return static_cast<usize>(frame.swapchain_image_index)
+               % std::max<usize>(1zu, frames_.size());
     }
 
     auto destroy_descriptor_resources() noexcept -> void
@@ -1135,6 +1518,11 @@ class RealtimeSphApp
     {
         for (auto& frame : frames_)
         {
+            if (frame.profile_queries != VK_NULL_HANDLE)
+            {
+                vkDestroyQueryPool(device_, frame.profile_queries, nullptr);
+                frame.profile_queries = VK_NULL_HANDLE;
+            }
             destroy_buffer(allocator_, frame.sim_params);
             destroy_buffer(allocator_, frame.render_params);
             destroy_buffer(allocator_, frame.stats);
@@ -1167,6 +1555,7 @@ class RealtimeSphApp
               &build_grid_pipeline_,
               &lambda_pipeline_,
               &delta_pipeline_,
+              &apply_delta_pipeline_,
               &velocity_pipeline_})
         {
             if (*pipeline != VK_NULL_HANDLE)
@@ -1205,6 +1594,7 @@ class RealtimeSphApp
     VkPipeline build_grid_pipeline_{VK_NULL_HANDLE};
     VkPipeline lambda_pipeline_{VK_NULL_HANDLE};
     VkPipeline delta_pipeline_{VK_NULL_HANDLE};
+    VkPipeline apply_delta_pipeline_{VK_NULL_HANDLE};
     VkPipeline velocity_pipeline_{VK_NULL_HANDLE};
     VkPipelineLayout render_pipeline_layout_{VK_NULL_HANDLE};
     VkPipeline render_pipeline_{VK_NULL_HANDLE};
@@ -1217,6 +1607,13 @@ class RealtimeSphApp
     f32 accumulator_{};
     u64 sim_step_index_{};
     GpuStats last_stats_{};
+    Vec3 initial_center_{};
+    f32 timestamp_period_ns_{};
+    double last_gpu_sim_ms_{};
+    usize last_recorded_frame_slot_{};
+    bool timestamp_supported_{};
+    bool has_recorded_frame_slot_{};
+    bool observed_invalid_state_{};
     bool resources_ready_{};
     bool reset_requested_{};
 };
@@ -1233,11 +1630,43 @@ class RealtimeSphApp
     }
 }
 
+[[nodiscard]] auto parse_f32(std::string_view text, f32 fallback) noexcept -> f32
+{
+    try
+    {
+        return std::stof(std::string{text});
+    }
+    catch (const std::exception&)
+    {
+        return fallback;
+    }
+}
+
+[[nodiscard]] auto scenario_from_text(std::string_view text) noexcept -> std::optional<Scenario>
+{
+    if (text == "dam-break")
+    {
+        return Scenario::dam_break;
+    }
+    if (text == "no-gravity-cube")
+    {
+        return Scenario::no_gravity_cube;
+    }
+    if (text == "opposing-cubes")
+    {
+        return Scenario::opposing_cubes;
+    }
+    return std::nullopt;
+}
+
 auto print_usage(const char* program) -> void
 {
     std::cerr << "usage: " << program
               << " [--particles N] [--paused] [--smoke-frames N] [--screenshot PATH]"
-                 " [--transparent-screenshot] [--hide-ui]\n";
+                 " [--fixed-frame-dt SECONDS] [--iterations N] [--max-substeps N]"
+                 " [--scenario dam-break|no-gravity-cube|opposing-cubes]"
+                 " [--max-center-delta N] [--max-speed N] [--max-z-span N]"
+                 " [--print-stats] [--fail-on-invalid] [--transparent-screenshot] [--hide-ui]\n";
 }
 
 }  // namespace
@@ -1245,6 +1674,12 @@ auto print_usage(const char* program) -> void
 auto run_realtime_sph_app(int argc, char** argv) -> int
 {
     auto settings = SimulationSettings{};
+    auto print_stats = false;
+    auto fail_on_invalid = false;
+    auto fixed_frame_dt = std::optional<f32>{};
+    auto max_center_delta = std::optional<f32>{};
+    auto max_speed = std::optional<f32>{};
+    auto max_z_span = std::optional<f32>{};
     auto runtime_config = RuntimeConfig{
         .window_title = "Realtime GPU SPH",
         .initial_width = 1440u,
@@ -1257,7 +1692,8 @@ auto run_realtime_sph_app(int argc, char** argv) -> int
         const auto arg = std::string_view{argv[i]};
         if (arg == "--particles" && i + 1 < argc)
         {
-            settings.target_particles = std::clamp(parse_u32(argv[++i], k_default_particles), 1'000u, 50'000u);
+            settings.target_particles =
+                std::clamp(parse_u32(argv[++i], k_default_particles), 1'000u, 50'000u);
         }
         else if (arg == "--paused")
         {
@@ -1270,6 +1706,50 @@ auto run_realtime_sph_app(int argc, char** argv) -> int
         else if (arg == "--screenshot" && i + 1 < argc)
         {
             runtime_config.screenshot_path = argv[++i];
+        }
+        else if (arg == "--fixed-frame-dt" && i + 1 < argc)
+        {
+            fixed_frame_dt = std::clamp(parse_f32(argv[++i], 1.0f / 60.0f), 0.0f, 0.08f);
+        }
+        else if (arg == "--iterations" && i + 1 < argc)
+        {
+            settings.solver_iterations =
+                std::clamp(parse_u32(argv[++i], settings.solver_iterations), 1u, 12u);
+        }
+        else if (arg == "--max-substeps" && i + 1 < argc)
+        {
+            settings.max_substeps_per_frame =
+                std::clamp(parse_u32(argv[++i], settings.max_substeps_per_frame), 1u, 8u);
+        }
+        else if (arg == "--max-center-delta" && i + 1 < argc)
+        {
+            max_center_delta = std::max(0.0f, parse_f32(argv[++i], 0.0f));
+        }
+        else if (arg == "--max-speed" && i + 1 < argc)
+        {
+            max_speed = std::max(0.0f, parse_f32(argv[++i], 0.0f));
+        }
+        else if (arg == "--max-z-span" && i + 1 < argc)
+        {
+            max_z_span = std::max(0.0f, parse_f32(argv[++i], 0.0f));
+        }
+        else if (arg == "--scenario" && i + 1 < argc)
+        {
+            const auto scenario = scenario_from_text(argv[++i]);
+            if (!scenario.has_value())
+            {
+                print_usage(argv[0]);
+                return 2;
+            }
+            settings.scenario = *scenario;
+        }
+        else if (arg == "--print-stats")
+        {
+            print_stats = true;
+        }
+        else if (arg == "--fail-on-invalid")
+        {
+            fail_on_invalid = true;
         }
         else if (arg == "--transparent-screenshot")
         {
@@ -1291,14 +1771,18 @@ auto run_realtime_sph_app(int argc, char** argv) -> int
         }
     }
 
+    apply_scenario_defaults(settings);
+
     auto runtime = Runtime{runtime_config};
     auto app = RealtimeSphApp{settings};
 
     runtime.initialize();
     app.setup(runtime);
+    const auto run_started = std::chrono::steady_clock::now();
+    auto rendered_frames = 0u;
     while (auto* frame = runtime.begin_frame())
     {
-        app.update(*frame, frame->dt_seconds);
+        app.update(*frame, fixed_frame_dt.value_or(frame->dt_seconds));
         if (runtime.ui_visible())
         {
             runtime.draw_runtime_ui();
@@ -1311,8 +1795,83 @@ auto run_realtime_sph_app(int argc, char** argv) -> int
         runtime.render_imgui();
         runtime.end_main_pass();
         runtime.end_frame();
+        ++rendered_frames;
+    }
+    const auto elapsed =
+        std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - run_started);
+    app.finalize_gpu_results();
+    const auto stats = app.final_stats();
+    const auto com = center_of_mass_from_stats(stats);
+    const auto center_delta = com - app.initial_center();
+    const auto center_delta_length = glm::length(center_delta);
+    const auto min_pos = min_position_from_stats(stats);
+    const auto max_pos = max_position_from_stats(stats);
+    const auto span = max_pos - min_pos;
+    const auto inv_count = stats.active == 0u ? 0.0 : 1.0 / static_cast<double>(stats.active);
+    const auto mean_velocity = Vec3{
+        static_cast<f32>(static_cast<double>(stats.sum_velocity_x_milli) * 0.001 * inv_count),
+        static_cast<f32>(static_cast<double>(stats.sum_velocity_y_milli) * 0.001 * inv_count),
+        static_cast<f32>(static_cast<double>(stats.sum_velocity_z_milli) * 0.001 * inv_count),
+    };
+    const auto max_speed_value = static_cast<double>(stats.max_speed_milli) / 1000.0;
+    if (print_stats)
+    {
+        const auto fps = elapsed.count() <= 0.0
+                             ? 0.0
+                             : 1000.0 * static_cast<double>(rendered_frames) / elapsed.count();
+        std::cout << "scenario=" << scenario_cli_name(settings.scenario)
+                  << " frames=" << rendered_frames
+                  << " sim_steps=" << static_cast<unsigned long long>(app.sim_step_count())
+                  << " wall_ms=" << elapsed.count() << " fps=" << fps
+                  << " gpu_step_ms=" << app.last_gpu_sim_ms() << " particles=" << stats.active
+                  << " escaped=" << stats.escaped << " overflow=" << stats.overflow
+                  << " nan=" << stats.nan_count << " invalid_events=" << stats.invalid_events
+                  << " overflow_events=" << stats.overflow_events
+                  << " observed_invalid=" << (app.observed_invalid_state() ? 1 : 0)
+                  << " max_neighbors=" << stats.max_neighbors << " max_speed=" << max_speed_value
+                  << " center=(" << static_cast<double>(com.x) << "," << static_cast<double>(com.y)
+                  << "," << static_cast<double>(com.z) << ")"
+                  << " center_delta=(" << static_cast<double>(center_delta.x) << ","
+                  << static_cast<double>(center_delta.y) << ","
+                  << static_cast<double>(center_delta.z) << ")"
+                  << " center_delta_len=" << static_cast<double>(center_delta_length)
+                  << " bounds_min=(" << static_cast<double>(min_pos.x) << ","
+                  << static_cast<double>(min_pos.y) << "," << static_cast<double>(min_pos.z) << ")"
+                  << " bounds_max=(" << static_cast<double>(max_pos.x) << ","
+                  << static_cast<double>(max_pos.y) << "," << static_cast<double>(max_pos.z) << ")"
+                  << " span=(" << static_cast<double>(span.x) << "," << static_cast<double>(span.y)
+                  << "," << static_cast<double>(span.z) << ")"
+                  << " mean_velocity=(" << static_cast<double>(mean_velocity.x) << ","
+                  << static_cast<double>(mean_velocity.y) << ","
+                  << static_cast<double>(mean_velocity.z) << ")";
+        std::cout << "\n";
+    }
+    auto exit_code = 0;
+    if (fail_on_invalid
+        && (app.observed_invalid_state() || stats.escaped != 0u || stats.overflow != 0u
+            || stats.nan_count != 0u || stats.invalid_events != 0u))
+    {
+        exit_code = 3;
+    }
+    if (max_center_delta.has_value() && center_delta_length > *max_center_delta)
+    {
+        std::cerr << "center delta " << static_cast<double>(center_delta_length)
+                  << " exceeded limit " << static_cast<double>(*max_center_delta) << "\n";
+        exit_code = exit_code == 0 ? 4 : exit_code;
+    }
+    if (max_speed.has_value() && max_speed_value > static_cast<double>(*max_speed))
+    {
+        std::cerr << "max speed " << max_speed_value << " exceeded limit "
+                  << static_cast<double>(*max_speed) << "\n";
+        exit_code = exit_code == 0 ? 5 : exit_code;
+    }
+    if (max_z_span.has_value() && span.z > *max_z_span)
+    {
+        std::cerr << "z span " << static_cast<double>(span.z) << " exceeded limit "
+                  << static_cast<double>(*max_z_span) << "\n";
+        exit_code = exit_code == 0 ? 6 : exit_code;
     }
     app.shutdown(runtime);
-    return 0;
+    return exit_code;
 }
 }  // namespace ds_vk_app::realtime_sph

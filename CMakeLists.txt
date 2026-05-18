@@ -183,6 +183,7 @@ if(DS_VK_BUILD_APP AND Vulkan_FOUND)
     app/realtime-sph/shaders/realtime_sph_build_grid.comp
     app/realtime-sph/shaders/realtime_sph_lambda.comp
     app/realtime-sph/shaders/realtime_sph_delta.comp
+    app/realtime-sph/shaders/realtime_sph_apply_delta.comp
     app/realtime-sph/shaders/realtime_sph_velocity.comp
     app/realtime-sph/shaders/realtime_sph_particles.vert
     app/realtime-sph/shaders/realtime_sph_particles.frag
