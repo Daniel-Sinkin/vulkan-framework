@@ -1,0 +1,139 @@
+#version 450
+
+layout(local_size_x = 128) in;
+
+struct SimParams
+{
+    vec4 domain_min_dt;
+    vec4 domain_max_radius;
+    vec4 gravity_rest_density;
+    vec4 kernel_poly6_spiky;
+    vec4 pbf_params;
+    vec4 viscosity_vorticity;
+    uvec4 counts;
+    uvec4 grid_size;
+};
+
+struct SimStats
+{
+    uint escaped;
+    uint overflow;
+    uint active_count;
+    uint nan_count;
+    uint max_neighbors;
+    uint max_speed_milli;
+    int sum_position_x_milli;
+    int sum_position_y_milli;
+    int sum_position_z_milli;
+    int sum_velocity_x_milli;
+    int sum_velocity_y_milli;
+    int sum_velocity_z_milli;
+    int min_position_x_milli;
+    int min_position_y_milli;
+    int min_position_z_milli;
+    int max_position_x_milli;
+    int max_position_y_milli;
+    int max_position_z_milli;
+    uint invalid_events;
+    uint overflow_events;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Positions
+{
+    vec4 positions_radius[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer CellCounts
+{
+    uint cell_counts[];
+};
+layout(std430, set = 0, binding = 5) readonly buffer CellParticles
+{
+    uint cell_particles[];
+};
+layout(std430, set = 0, binding = 6) readonly buffer ParamsBuffer
+{
+    SimParams params;
+};
+layout(std430, set = 0, binding = 7) buffer StatsBuffer
+{
+    SimStats stats;
+};
+layout(std430, set = 0, binding = 9) buffer NeighborCounts
+{
+    uint neighbor_counts[];
+};
+layout(std430, set = 0, binding = 10) buffer NeighborIds
+{
+    uint neighbor_ids[];
+};
+
+uvec3 cell_for_position(vec3 p)
+{
+    const vec3 rel = (p - params.domain_min_dt.xyz) / params.kernel_poly6_spiky.z;
+    return clamp(uvec3(floor(rel)), uvec3(0u), params.grid_size.xyz - uvec3(1u));
+}
+
+uint flatten_cell(uvec3 c)
+{
+    return c.x + params.grid_size.x * (c.y + params.grid_size.y * c.z);
+}
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= params.counts.x)
+    {
+        return;
+    }
+
+    const vec3 xi = positions_radius[id].xyz;
+    const uvec3 base_cell = cell_for_position(xi);
+    const float h2 = params.kernel_poly6_spiky.z * params.kernel_poly6_spiky.z;
+    const uint max_cached_neighbors = params.counts.w;
+    uint stored_count = 0u;
+    uint actual_count = 0u;
+
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const ivec3 ic = ivec3(base_cell) + ivec3(dx, dy, dz);
+                if (any(lessThan(ic, ivec3(0)))
+                    || any(greaterThanEqual(ic, ivec3(params.grid_size.xyz))))
+                {
+                    continue;
+                }
+
+                const uint cell = flatten_cell(uvec3(ic));
+                const uint count = min(cell_counts[cell], params.counts.z);
+                for (uint slot = 0u; slot < count; ++slot)
+                {
+                    const uint j = cell_particles[cell * params.counts.z + slot];
+                    if (j == id)
+                    {
+                        continue;
+                    }
+                    const vec3 r = xi - positions_radius[j].xyz;
+                    if (dot(r, r) >= h2)
+                    {
+                        continue;
+                    }
+
+                    if (stored_count < max_cached_neighbors)
+                    {
+                        neighbor_ids[id * max_cached_neighbors + stored_count] = j;
+                        stored_count += 1u;
+                    }
+                    actual_count += 1u;
+                }
+            }
+
+    neighbor_counts[id] = stored_count;
+    atomicMax(stats.max_neighbors, actual_count);
+    if (actual_count > max_cached_neighbors)
+    {
+        atomicAdd(stats.overflow, 1u);
+        atomicAdd(stats.overflow_events, 1u);
+        atomicAdd(stats.invalid_events, 1u);
+    }
+}

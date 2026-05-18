@@ -2,14 +2,6 @@
 
 layout(local_size_x = 128) in;
 
-struct Particle
-{
-    vec4 position_radius;
-    vec4 previous_density;
-    vec4 velocity_lambda;
-    vec4 delta_neighbors;
-};
-
 struct SimParams
 {
     vec4 domain_min_dt;
@@ -22,14 +14,185 @@ struct SimParams
     uvec4 grid_size;
 };
 
-layout(std430, set = 0, binding = 0) buffer Particles
+struct RigidBody
 {
-    Particle particles[];
+    vec4 center_type;
+    vec4 extent_radius;
+    vec4 velocity_inv_mass;
+    vec4 orientation;
 };
-layout(std430, set = 0, binding = 3) readonly buffer ParamsBuffer
+
+layout(std430, set = 0, binding = 0) buffer Positions
+{
+    vec4 positions_radius[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer DeltaNeighbors
+{
+    vec4 delta_neighbors[];
+};
+layout(std430, set = 0, binding = 6) readonly buffer ParamsBuffer
 {
     SimParams params;
 };
+layout(std430, set = 0, binding = 11) readonly buffer RigidBodies
+{
+    RigidBody rigid_bodies[];
+};
+layout(std430, set = 0, binding = 12) buffer RigidImpulses
+{
+    ivec4 rigid_impulses[];
+};
+
+const uint RIGID_SHAPE_SPHERE = 0u;
+const uint RIGID_SHAPE_BOX = 1u;
+const float RIGID_IMPULSE_SCALE = 100000.0;
+
+vec3 rotate_by_quat(vec3 value, vec4 quat)
+{
+    return value + 2.0 * cross(quat.xyz, cross(quat.xyz, value) + quat.w * value);
+}
+
+vec3 rotate_by_inverse_quat(vec3 value, vec4 quat)
+{
+    return rotate_by_quat(value, vec4(-quat.xyz, quat.w));
+}
+
+float signed_axis(float value)
+{
+    return value < 0.0 ? -1.0 : 1.0;
+}
+
+bool sphere_collision(
+    vec3 x,
+    float particle_radius,
+    RigidBody body,
+    out vec3 correction,
+    out vec3 contact_point
+)
+{
+    const vec3 r = x - body.center_type.xyz;
+    const float combined_radius = particle_radius + body.extent_radius.w;
+    const float dist2 = dot(r, r);
+    if (dist2 >= combined_radius * combined_radius)
+    {
+        correction = vec3(0.0);
+        contact_point = body.center_type.xyz;
+        return false;
+    }
+    const float dist = sqrt(max(dist2, 1.0e-12));
+    const vec3 normal = dist > 1.0e-6 ? r / dist : vec3(0.0, 0.0, 1.0);
+    correction = normal * (combined_radius - dist);
+    contact_point = body.center_type.xyz + normal * body.extent_radius.w;
+    return true;
+}
+
+bool box_collision(
+    vec3 x,
+    float particle_radius,
+    RigidBody body,
+    out vec3 correction,
+    out vec3 contact_point
+)
+{
+    const vec3 half_extent = max(body.extent_radius.xyz, vec3(1.0e-4));
+    const vec3 local = rotate_by_inverse_quat(x - body.center_type.xyz, body.orientation);
+    const vec3 closest = clamp(local, -half_extent, half_extent);
+    const vec3 diff = local - closest;
+    const float dist2 = dot(diff, diff);
+    if (dist2 > 1.0e-12)
+    {
+        const float dist = sqrt(dist2);
+        if (dist >= particle_radius)
+        {
+            correction = vec3(0.0);
+            contact_point = body.center_type.xyz + rotate_by_quat(closest, body.orientation);
+            return false;
+        }
+        correction = rotate_by_quat((diff / dist) * (particle_radius - dist), body.orientation);
+        contact_point = body.center_type.xyz + rotate_by_quat(closest, body.orientation);
+        return true;
+    }
+
+    const vec3 face_distance = half_extent - abs(local);
+    vec3 normal = vec3(signed_axis(local.x), 0.0, 0.0);
+    vec3 contact_local = local;
+    contact_local.x = normal.x * half_extent.x;
+    float penetration = face_distance.x;
+    if (face_distance.y < penetration)
+    {
+        normal = vec3(0.0, signed_axis(local.y), 0.0);
+        contact_local = local;
+        contact_local.y = normal.y * half_extent.y;
+        penetration = face_distance.y;
+    }
+    if (face_distance.z < penetration)
+    {
+        normal = vec3(0.0, 0.0, signed_axis(local.z));
+        contact_local = local;
+        contact_local.z = normal.z * half_extent.z;
+        penetration = face_distance.z;
+    }
+    correction = rotate_by_quat(normal * (particle_radius + penetration), body.orientation);
+    contact_point = body.center_type.xyz + rotate_by_quat(contact_local, body.orientation);
+    return true;
+}
+
+void accumulate_rigid_impulse(
+    uint body_index,
+    vec3 body_center,
+    vec3 contact_point,
+    vec3 correction
+)
+{
+    const vec3 body_correction = -correction;
+    const vec3 torque = cross(contact_point - body_center, body_correction);
+    const ivec3 packed = ivec3(clamp(
+        body_correction * RIGID_IMPULSE_SCALE,
+        vec3(-2000000000.0),
+        vec3(2000000000.0)
+    ));
+    const ivec3 packed_torque = ivec3(clamp(
+        torque * RIGID_IMPULSE_SCALE,
+        vec3(-2000000000.0),
+        vec3(2000000000.0)
+    ));
+    const uint base = 2u * body_index;
+    atomicAdd(rigid_impulses[base].x, packed.x);
+    atomicAdd(rigid_impulses[base].y, packed.y);
+    atomicAdd(rigid_impulses[base].z, packed.z);
+    atomicAdd(rigid_impulses[base].w, 1);
+    atomicAdd(rigid_impulses[base + 1u].x, packed_torque.x);
+    atomicAdd(rigid_impulses[base + 1u].y, packed_torque.y);
+    atomicAdd(rigid_impulses[base + 1u].z, packed_torque.z);
+}
+
+vec3 apply_rigid_collisions(vec3 x, float particle_radius)
+{
+    const uint body_count = params.grid_size.w;
+    for (uint body_index = 0u; body_index < body_count; ++body_index)
+    {
+        const RigidBody body = rigid_bodies[body_index];
+        const uint shape = uint(body.center_type.w + 0.5);
+        vec3 correction = vec3(0.0);
+        vec3 contact_point = body.center_type.xyz;
+        bool hit = false;
+        if (shape == RIGID_SHAPE_SPHERE)
+        {
+            hit = sphere_collision(x, particle_radius, body, correction, contact_point);
+        }
+        else
+        {
+            hit = box_collision(x, particle_radius, body, correction, contact_point);
+        }
+        if (!hit)
+        {
+            continue;
+        }
+        x += correction;
+        accumulate_rigid_impulse(body_index, body.center_type.xyz, contact_point, correction);
+    }
+    return x;
+}
 
 void main()
 {
@@ -39,13 +202,21 @@ void main()
         return;
     }
 
-    Particle p = particles[id];
     const float radius = params.domain_max_radius.w;
-    p.position_radius.xyz += p.delta_neighbors.xyz;
-    p.position_radius.xyz = clamp(
-        p.position_radius.xyz,
+    vec3 position = positions_radius[id].xyz + delta_neighbors[id].xyz;
+    position = clamp(
+        position,
         params.domain_min_dt.xyz + vec3(radius),
         params.domain_max_radius.xyz - vec3(radius)
     );
-    particles[id] = p;
+    if (params.grid_size.w > 0u)
+    {
+        position = apply_rigid_collisions(position, radius);
+        position = clamp(
+            position,
+            params.domain_min_dt.xyz + vec3(radius),
+            params.domain_max_radius.xyz - vec3(radius)
+        );
+    }
+    positions_radius[id] = vec4(position, radius);
 }

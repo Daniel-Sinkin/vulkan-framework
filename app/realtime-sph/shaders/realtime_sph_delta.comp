@@ -2,13 +2,7 @@
 
 layout(local_size_x = 128) in;
 
-struct Particle
-{
-    vec4 position_radius;
-    vec4 previous_density;
-    vec4 velocity_lambda;
-    vec4 delta_neighbors;
-};
+const uint KERNEL_LUT_SIZE = 4096u;
 
 struct SimParams
 {
@@ -22,44 +16,56 @@ struct SimParams
     uvec4 grid_size;
 };
 
-layout(std430, set = 0, binding = 0) buffer Particles
+layout(std430, set = 0, binding = 0) readonly buffer Positions
 {
-    Particle particles[];
+    vec4 positions_radius[];
 };
-layout(std430, set = 0, binding = 1) readonly buffer CellCounts
+layout(std430, set = 0, binding = 2) readonly buffer VelocityLambda
+{
+    vec4 velocity_lambda[];
+};
+layout(std430, set = 0, binding = 3) buffer DeltaNeighbors
+{
+    vec4 delta_neighbors[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer CellCounts
 {
     uint cell_counts[];
 };
-layout(std430, set = 0, binding = 2) readonly buffer CellParticles
+layout(std430, set = 0, binding = 5) readonly buffer CellParticles
 {
     uint cell_particles[];
 };
-layout(std430, set = 0, binding = 3) readonly buffer ParamsBuffer
+layout(std430, set = 0, binding = 6) readonly buffer ParamsBuffer
 {
     SimParams params;
 };
-float poly6(float r2)
+layout(std430, set = 0, binding = 8) readonly buffer KernelLut
 {
-    const float h = params.kernel_poly6_spiky.z;
-    const float h2 = h * h;
-    if (r2 >= h2)
-    {
-        return 0.0;
-    }
-    const float x = h2 - r2;
-    return params.kernel_poly6_spiky.x * x * x * x;
-}
+    vec4 kernel_lut[];
+};
+layout(std430, set = 0, binding = 9) readonly buffer NeighborCounts
+{
+    uint neighbor_counts[];
+};
+layout(std430, set = 0, binding = 10) readonly buffer NeighborIds
+{
+    uint neighbor_ids[];
+};
 
-vec3 spiky_grad(vec3 r)
+layout(push_constant) uniform SolverProfilePush
 {
-    const float d = length(r);
-    const float h = params.kernel_poly6_spiky.z;
-    if (d <= 1.0e-6 || d >= h)
+    uint solver_profile_mode;
+} profile;
+
+vec2 kernel_lookup(float r2)
+{
+    if (r2 >= params.kernel_poly6_spiky.z * params.kernel_poly6_spiky.z)
     {
-        return vec3(0.0);
+        return vec2(0.0);
     }
-    const float x = h - d;
-    return params.kernel_poly6_spiky.y * x * x * (r / d);
+    const uint index = min(uint(r2 * params.pbf_params.z), KERNEL_LUT_SIZE - 1u);
+    return kernel_lut[index].xy;
 }
 
 uvec3 cell_for_position(vec3 p)
@@ -73,16 +79,33 @@ uint flatten_cell(uvec3 c)
     return c.x + params.grid_size.x * (c.y + params.grid_size.y * c.z);
 }
 
+bool profile_neighbor_scan()
+{
+    return profile.solver_profile_mode == 1u;
+}
+
+float artificial_pressure(float w, float scorr_ref)
+{
+    const float strength = params.pbf_params.y;
+    if (strength <= 0.0)
+    {
+        return 0.0;
+    }
+    const float corr_ratio = w / scorr_ref;
+    const float corr_ratio2 = corr_ratio * corr_ratio;
+    return -strength * corr_ratio2 * corr_ratio2;
+}
+
 vec3 boundary_delta(vec3 r, float lambda_i, float scorr_ref)
 {
-    const float w = poly6(dot(r, r));
+    const vec2 kernel = kernel_lookup(dot(r, r));
+    const float w = kernel.x;
     if (w <= 0.0)
     {
         return vec3(0.0);
     }
-    const float corr_ratio = w / scorr_ref;
-    const float scorr = -params.pbf_params.y * pow(corr_ratio, params.pbf_params.w);
-    return (lambda_i + scorr) * spiky_grad(r);
+    const float scorr = artificial_pressure(w, scorr_ref);
+    return (lambda_i + scorr) * kernel.y * r;
 }
 
 vec3 boundary_correction(vec3 x, float lambda_i, float scorr_ref)
@@ -111,49 +134,45 @@ void main()
         return;
     }
 
-    const vec3 xi = particles[id].position_radius.xyz;
-    const float lambda_i = particles[id].velocity_lambda.w;
-    const uvec3 base_cell = cell_for_position(xi);
+    const vec3 xi = positions_radius[id].xyz;
+    const float lambda_i = velocity_lambda[id].w;
     const float mass = params.kernel_poly6_spiky.w;
     const float inv_rho0 = 1.0 / params.gravity_rest_density.w;
-    const float scorr_ref = max(poly6(params.pbf_params.z * params.pbf_params.z), 1.0e-6);
+    const float scorr_ref = params.pbf_params.w;
     vec3 delta = vec3(0.0);
+    const uint max_cached_neighbors = params.counts.w;
+    const uint neighbor_count = neighbor_counts[id];
+    const bool scan_only = profile_neighbor_scan();
 
-    for (int dz = -1; dz <= 1; ++dz)
-        for (int dy = -1; dy <= 1; ++dy)
-            for (int dx = -1; dx <= 1; ++dx)
-            {
-                const ivec3 ic = ivec3(base_cell) + ivec3(dx, dy, dz);
-                if (any(lessThan(ic, ivec3(0)))
-                    || any(greaterThanEqual(ic, ivec3(params.grid_size.xyz))))
-                {
-                    continue;
-                }
-                const uint cell = flatten_cell(uvec3(ic));
-                const uint count = min(cell_counts[cell], params.counts.z);
-                for (uint slot = 0u; slot < count; ++slot)
-                {
-                    const uint j = cell_particles[cell * params.counts.z + slot];
-                    if (j == id)
-                    {
-                        continue;
-                    }
-                    const vec3 r = xi - particles[j].position_radius.xyz;
-                    const float r2 = dot(r, r);
-                    const float w = poly6(r2);
-                    if (w <= 0.0)
-                    {
-                        continue;
-                    }
-                    const float corr_ratio = w / scorr_ref;
-                    const float scorr = -params.pbf_params.y * pow(corr_ratio, params.pbf_params.w);
-                    delta += (lambda_i + particles[j].velocity_lambda.w + scorr) * spiky_grad(r);
-                }
-            }
+    if (scan_only)
+    {
+        uint active_neighbor_count = 0u;
+        const float h2 = params.kernel_poly6_spiky.z * params.kernel_poly6_spiky.z;
+        for (uint slot = 0u; slot < neighbor_count; ++slot)
+        {
+            const uint j = neighbor_ids[id * max_cached_neighbors + slot];
+            const vec3 r = xi - positions_radius[j].xyz;
+            active_neighbor_count += dot(r, r) < h2 ? 1u : 0u;
+        }
+        delta_neighbors[id].xyz = vec3(float(active_neighbor_count) * 1.0e-9);
+        return;
+    }
+
+    for (uint slot = 0u; slot < neighbor_count; ++slot)
+    {
+        const uint j = neighbor_ids[id * max_cached_neighbors + slot];
+        const vec3 r = xi - positions_radius[j].xyz;
+        const vec2 kernel = kernel_lookup(dot(r, r));
+        const float w = kernel.x;
+        if (w <= 0.0)
+        {
+            continue;
+        }
+        const float scorr = artificial_pressure(w, scorr_ref);
+        delta += (lambda_i + velocity_lambda[j].w + scorr) * kernel.y * r;
+    }
 
     delta += boundary_correction(xi, lambda_i, scorr_ref);
     delta *= mass * inv_rho0;
-    Particle p = particles[id];
-    p.delta_neighbors.xyz = delta;
-    particles[id] = p;
+    delta_neighbors[id].xyz = delta;
 }

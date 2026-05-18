@@ -13,7 +13,7 @@ struct RenderParams
     vec4 options;
 };
 
-layout(std430, set = 0, binding = 1) readonly buffer RenderParamsBuffer
+layout(std430, set = 0, binding = 2) readonly buffer RenderParamsBuffer
 {
     RenderParams render_params;
 };
@@ -45,4 +45,3 @@ void main()
     const vec3 color = v_color.rgb * (0.34 + 0.66 * ndl) + vec3(0.18, 0.28, 0.32) * rim;
     out_color = vec4(color, v_color.a);
 }
-

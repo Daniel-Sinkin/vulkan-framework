@@ -2,14 +2,6 @@
 
 layout(local_size_x = 128) in;
 
-struct Particle
-{
-    vec4 position_radius;
-    vec4 previous_density;
-    vec4 velocity_lambda;
-    vec4 delta_neighbors;
-};
-
 struct SimParams
 {
     vec4 domain_min_dt;
@@ -46,23 +38,23 @@ struct SimStats
     uint overflow_events;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer Particles
+layout(std430, set = 0, binding = 0) readonly buffer Positions
 {
-    Particle particles[];
+    vec4 positions_radius[];
 };
-layout(std430, set = 0, binding = 1) buffer CellCounts
+layout(std430, set = 0, binding = 4) buffer CellCounts
 {
     uint cell_counts[];
 };
-layout(std430, set = 0, binding = 2) buffer CellParticles
+layout(std430, set = 0, binding = 5) buffer CellParticles
 {
     uint cell_particles[];
 };
-layout(std430, set = 0, binding = 3) readonly buffer ParamsBuffer
+layout(std430, set = 0, binding = 6) readonly buffer ParamsBuffer
 {
     SimParams params;
 };
-layout(std430, set = 0, binding = 4) buffer StatsBuffer
+layout(std430, set = 0, binding = 7) buffer StatsBuffer
 {
     SimStats stats;
 };
@@ -86,7 +78,7 @@ void main()
         return;
     }
 
-    const uint cell = flatten_cell(cell_for_position(particles[id].position_radius.xyz));
+    const uint cell = flatten_cell(cell_for_position(positions_radius[id].xyz));
     const uint slot = atomicAdd(cell_counts[cell], 1u);
     if (slot < params.counts.z)
     {

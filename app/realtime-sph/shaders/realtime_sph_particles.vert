@@ -1,13 +1,5 @@
 #version 450
 
-struct Particle
-{
-    vec4 position_radius;
-    vec4 previous_density;
-    vec4 velocity_lambda;
-    vec4 delta_neighbors;
-};
-
 struct RenderParams
 {
     mat4 view_projection;
@@ -21,11 +13,15 @@ struct RenderParams
     vec4 options;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer Particles
+layout(std430, set = 0, binding = 0) readonly buffer Positions
 {
-    Particle particles[];
+    vec4 positions_radius[];
 };
-layout(std430, set = 0, binding = 1) readonly buffer RenderParamsBuffer
+layout(std430, set = 0, binding = 1) readonly buffer VelocityLambda
+{
+    vec4 velocity_lambda[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer RenderParamsBuffer
 {
     RenderParams render_params;
 };
@@ -59,18 +55,18 @@ vec3 ramp(float t)
 
 void main()
 {
-    const Particle p = particles[gl_InstanceIndex];
+    const vec4 position_radius = positions_radius[gl_InstanceIndex];
+    const vec4 particle_velocity_lambda = velocity_lambda[gl_InstanceIndex];
     const vec2 local = k_corners[gl_VertexIndex];
-    const float radius = p.position_radius.w * render_params.options.x;
+    const float radius = position_radius.w * render_params.options.x;
     const vec3 world =
-        p.position_radius.xyz +
+        position_radius.xyz +
         (render_params.camera_right.xyz * local.x + render_params.camera_up.xyz * local.y) * radius;
 
-    const float speed_t = clamp(length(p.velocity_lambda.xyz) / max(render_params.options.y, 0.001), 0.0, 1.0);
+    const float speed_t = clamp(length(particle_velocity_lambda.xyz) / max(render_params.options.y, 0.001), 0.0, 1.0);
     v_local = local;
-    v_center_view = (render_params.view * vec4(p.position_radius.xyz, 1.0)).xyz;
+    v_center_view = (render_params.view * vec4(position_radius.xyz, 1.0)).xyz;
     v_radius = radius;
     v_color = vec4(mix(render_params.base_color.rgb, ramp(speed_t), render_params.options.z), render_params.base_color.a);
     gl_Position = render_params.view_projection * vec4(world, 1.0);
 }
-
